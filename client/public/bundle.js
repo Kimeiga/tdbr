@@ -5614,7 +5614,16 @@ void main() {
     if (Phaser.Input.Keyboard.JustDown(keys.r)) {
       channel.emit("reload");
     }
-    if (pointer.isDown && !keys.shift.isDown) {
+    if (!window._pointerReady) {
+      if (!pointer.isDown) window._pointerReady = true;
+    }
+    if (!window._pointerMoved) {
+      if (pointer.x !== pointer.prevPosition.x || pointer.y !== pointer.prevPosition.y) {
+        window._pointerMoved = true;
+      }
+    }
+    const aimDist = Math.hypot(worldPoint.x - predictedX, worldPoint.y - predictedY);
+    if (pointer.isDown && window._pointerReady && window._pointerMoved && aimDist > 20 && !keys.shift.isDown && !(me && me.reloading)) {
       const now = Date.now();
       if (!window._lastFireTime) window._lastFireTime = 0;
       const minInterval = 100;

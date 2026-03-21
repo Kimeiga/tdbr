@@ -449,11 +449,25 @@ function update(time, delta) {
     channel.emit('reload');
   }
 
-  if (pointer.isDown && !keys.shift.isDown) {
-    // Client-side fire rate limiting (server also enforces)
+  // Fire weapon — require:
+  // 1. Pointer released at least once since load (prevents click-to-focus firing)
+  // 2. Pointer has moved (prevents firing at angle 0 on spawn)
+  // 3. Not sprinting or reloading
+  if (!window._pointerReady) {
+    if (!pointer.isDown) window._pointerReady = true;
+  }
+  if (!window._pointerMoved) {
+    if (pointer.x !== pointer.prevPosition.x || pointer.y !== pointer.prevPosition.y) {
+      window._pointerMoved = true;
+    }
+  }
+  // Don't fire if mouse is too close to player (prevents firing at self/random direction)
+  const aimDist = Math.hypot(worldPoint.x - predictedX, worldPoint.y - predictedY);
+  if (pointer.isDown && window._pointerReady && window._pointerMoved && aimDist > 20
+      && !keys.shift.isDown && !(me && me.reloading)) {
     const now = Date.now();
     if (!window._lastFireTime) window._lastFireTime = 0;
-    const minInterval = 100; // min 100ms between fire events (server has exact weapon rate)
+    const minInterval = 100;
     if (now - window._lastFireTime >= minInterval) {
       channel.emit('fire', { angle, slot: activeSlot, latency });
       window._lastFireTime = now;
