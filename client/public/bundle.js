@@ -5615,7 +5615,13 @@ void main() {
       channel.emit("reload");
     }
     if (pointer.isDown && !keys.shift.isDown) {
-      channel.emit("fire", { angle, slot: activeSlot, latency });
+      const now = Date.now();
+      if (!window._lastFireTime) window._lastFireTime = 0;
+      const minInterval = 100;
+      if (now - window._lastFireTime >= minInterval) {
+        channel.emit("fire", { angle, slot: activeSlot, latency });
+        window._lastFireTime = now;
+      }
     }
     if (Phaser.Input.Keyboard.JustDown(keys.e)) {
       const nl = findNearestLoot();
@@ -6251,7 +6257,15 @@ void main() {
         sx = entry.body.x + (p.x - entry.body.x) * INTERP_SPEED;
         sy = entry.body.y + (p.y - entry.body.y) * INTERP_SPEED;
       }
-      const dir = angleToDirection(p.angle);
+      let aimAngle = p.angle;
+      if (isMe && activeScene) {
+        const pointer = activeScene.input.activePointer;
+        if (pointer) {
+          const wp = activeScene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+          aimAngle = Math.atan2(wp.y - sy, wp.x - sx);
+        }
+      }
+      const dir = angleToDirection(aimAngle);
       const dx = sx - entry.prevX, dy = sy - entry.prevY;
       const isMoving = dx * dx + dy * dy > 0.5;
       entry.prevX = sx;
@@ -6267,8 +6281,8 @@ void main() {
       if (wpnTex && p.alive) {
         entry.weapon.setTexture(wpnTex).setVisible(true);
         entry.weapon.setPosition(sx, sy - 20);
-        entry.weapon.setRotation(p.angle);
-        entry.weapon.setFlipY(Math.abs(p.angle) > Math.PI / 2);
+        entry.weapon.setRotation(aimAngle);
+        entry.weapon.setFlipY(Math.abs(aimAngle) > Math.PI / 2);
         entry.weapon.setDepth(dir === "up" ? yDepth - 0.1 : yDepth + 0.1);
       } else {
         entry.weapon.setVisible(false);
