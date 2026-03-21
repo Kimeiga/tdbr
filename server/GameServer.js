@@ -191,21 +191,8 @@ export class GameServer {
     const p = this.players.get(channelId);
     if (!p) return;
     if (!p.alive) {
-      // Respawn
-      const pos = this.getSpawnPos();
-      p.x = pos.x;
-      p.y = pos.y;
-      p.hp = p.maxHp;
-      p.alive = true;
-      p.spawnProtection = 180; // 3 seconds invulnerability
-      p.inputs = [];
-      p.reloading = false;
-      p.boost = 0;
-      p.inventory = createInventory();
-      addToInventory(p.inventory, ITEM_DEFS.pistol);
-      p.inventory.ammo['9mm'] = 60;
-      p.inventory.magAmmo.primary = WEAPON_DEFS.pistol.magSize;
-      this.events.push({ type: 'respawn', playerId: channelId });
+      // Dead in battle royale = dead. No respawns.
+      // Game auto-restarts when all humans are dead.
       return;
     }
     p.inputs.push(data);

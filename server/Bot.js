@@ -31,7 +31,7 @@ class Bot {
     this.state = 'PATROL';
     this.speed = 60;
     this.baseSpeed = 60;
-    this.aggroRange = 250;
+    this.aggroRange = 500; // ~10 tiles at 48px
     this.angle = 0;
 
     // Inventory
@@ -152,12 +152,12 @@ class Bot {
     enemies.sort((a, b) => a.dist - b.dist);
     this.visibleEnemies = enemies;
 
-    // Scan loot within 200px that isn't picked up
+    // Scan loot within 400px that isn't picked up
     const loot = [];
     for (const item of gameState.loot) {
       if (item.pickedUp) continue;
       const dist = this._dist(item.x, item.y);
-      if (dist > 200) continue;
+      if (dist > 400) continue;
       loot.push({ id: item.id, x: item.x, y: item.y, itemId: item.itemId, dist });
     }
     loot.sort((a, b) => a.dist - b.dist);
@@ -246,7 +246,7 @@ class Bot {
     this.pathAge = 0;
 
     if (newState === 'IDLE') {
-      this.idleWait = 2 + Math.random();
+      this.idleWait = 0.5 + Math.random() * 0.5; // short idle before patrolling again
       this.idleTimer = 0;
     }
     if (newState === 'HEAL') {

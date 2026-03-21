@@ -5588,10 +5588,6 @@ void main() {
     const me = serverPlayers.find((p) => p.id === myId);
     if (me && !me.alive) {
       if (!isShowingDeathScreen) showDeathScreen(this);
-      if (Phaser.Input.Keyboard.JustDown(keys.r)) {
-        channel.emit("input", { seq: ++inputSeq, keys: { w: false, a: false, s: false, d: false }, angle: 0 });
-        hideDeathScreen();
-      }
       return;
     }
     if (isShowingDeathScreen) hideDeathScreen();
@@ -6075,11 +6071,24 @@ void main() {
           const shooter = serverPlayers.find((p) => p.id === ev.shooterId);
           const baseX = shooter ? shooter.x : predictedX;
           const baseY = shooter ? shooter.y : predictedY;
-          const sx = baseX + Math.cos(ev.angle) * 24;
-          const sy = baseY - 16 + Math.sin(ev.angle) * 24;
-          const endX = baseX + Math.cos(ev.angle) * 500;
-          const endY = baseY - 16 + Math.sin(ev.angle) * 500;
-          drawTracer(scene, sx, sy, endX, endY);
+          const originX = baseX;
+          const originY = baseY - 16;
+          let tracerEndX = originX + Math.cos(ev.angle) * 500;
+          let tracerEndY = originY + Math.sin(ev.angle) * 500;
+          const raySteps = Math.ceil(500 / 8);
+          for (let i = 1; i <= raySteps; i++) {
+            const rx = originX + Math.cos(ev.angle) * i * 8;
+            const ry = originY + Math.sin(ev.angle) * i * 8;
+            const tx = Math.floor(rx / TILE_PX), ty = Math.floor(ry / TILE_PX);
+            if (tileBlocksVision(tx, ty)) {
+              tracerEndX = rx;
+              tracerEndY = ry;
+              break;
+            }
+          }
+          const sx = originX + Math.cos(ev.angle) * 24;
+          const sy = originY + Math.sin(ev.angle) * 24;
+          drawTracer(scene, sx, sy, tracerEndX, tracerEndY);
           const flash = scene.add.sprite(
             sx + Math.cos(ev.angle) * 8,
             sy + Math.sin(ev.angle) * 8,
@@ -6643,11 +6652,10 @@ void main() {
       }
     ).setScrollFactor(0).setDepth(D + 1).setOrigin(0.5);
     elements.push(statsText);
-    const respawn = scene.add.text(sw / 2, sh / 2 + 60, "PRESS R TO RESPAWN", {
-      fontSize: "18px",
-      fill: "#44ff66",
-      fontFamily: "monospace",
-      fontStyle: "bold"
+    const respawn = scene.add.text(sw / 2, sh / 2 + 60, "GAME OVER \u2014 NEW MATCH STARTING SOON", {
+      fontSize: "14px",
+      fill: "#aaaaaa",
+      fontFamily: "monospace"
     }).setScrollFactor(0).setDepth(D + 1).setOrigin(0.5);
     scene.tweens.add({
       targets: respawn,
@@ -6717,7 +6725,7 @@ void main() {
     },
     sendInput(keys, angle) {
       if (!channel || !connected) return;
-      const inp = { seq: ++inputSeq, keys, angle: angle || 0 };
+      const inp = { seq: ++inputSeq, keys: { w: false, a: false, s: false, d: false, shift: false, ctrl: false, ...keys }, angle: angle || 0 };
       applyInput(inp, 1 / 60);
       pendingInputs.push(inp);
       channel.emit("input", inp);
@@ -6803,10 +6811,10 @@ void main() {
             return;
           }
         }
-        if (s.player.hp < 120 && s.player.inventory.consumables.length > 0) {
+        if (s.player.hp < 60 && s.player.inventory.consumables.length > 0) {
           channel.emit("use_item", { slot: "consumable", index: 0 });
         }
-        if (s.player.hp < 80) {
+        if (s.player.hp < 30) {
           const retreated = this.dodge();
           if (retreated) return;
         }

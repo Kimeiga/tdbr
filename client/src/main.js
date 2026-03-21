@@ -420,11 +420,7 @@ function update(time, delta) {
   const me = serverPlayers.find(p => p.id === myId);
   if (me && !me.alive) {
     if (!isShowingDeathScreen) showDeathScreen(this);
-    if (Phaser.Input.Keyboard.JustDown(keys.r)) {
-      channel.emit('input', { seq: ++inputSeq, keys: {w:false,a:false,s:false,d:false}, angle: 0 });
-      hideDeathScreen();
-    }
-    return; // Block all other input while dead
+    return; // Block all input while dead — game auto-restarts
   }
   if (isShowingDeathScreen) hideDeathScreen();
 
@@ -943,16 +939,28 @@ function processEvents(scene) {
   for (const ev of serverEvents) {
     switch (ev.type) {
       case 'fire': {
-        // Tracer line from shooter — start 24px along fire direction from feet
-        // to avoid visual overlap with walls behind the character
+        // Tracer line from shooter — raycast to find wall hit on client
         const shooter = serverPlayers.find(p => p.id === ev.shooterId);
         const baseX = shooter ? shooter.x : predictedX;
         const baseY = shooter ? shooter.y : predictedY;
-        const sx = baseX + Math.cos(ev.angle) * 24;
-        const sy = baseY - 16 + Math.sin(ev.angle) * 24;
-        const endX = baseX + Math.cos(ev.angle) * 500;
-        const endY = baseY - 16 + Math.sin(ev.angle) * 500;
-        drawTracer(scene, sx, sy, endX, endY);
+        const originX = baseX;
+        const originY = baseY - 16; // center-mass
+        // Raycast to find where tracer hits a wall
+        let tracerEndX = originX + Math.cos(ev.angle) * 500;
+        let tracerEndY = originY + Math.sin(ev.angle) * 500;
+        const raySteps = Math.ceil(500 / 8);
+        for (let i = 1; i <= raySteps; i++) {
+          const rx = originX + Math.cos(ev.angle) * i * 8;
+          const ry = originY + Math.sin(ev.angle) * i * 8;
+          const tx = Math.floor(rx / TILE_PX), ty = Math.floor(ry / TILE_PX);
+          if (tileBlocksVision(tx, ty)) {
+            tracerEndX = rx; tracerEndY = ry;
+            break;
+          }
+        }
+        const sx = originX + Math.cos(ev.angle) * 24;
+        const sy = originY + Math.sin(ev.angle) * 24;
+        drawTracer(scene, sx, sy, tracerEndX, tracerEndY);
 
         // Muzzle flash
         const flash = scene.add.sprite(
@@ -1627,9 +1635,9 @@ function showDeathScreen(scene) {
   }).setScrollFactor(0).setDepth(D+1).setOrigin(0.5);
   elements.push(statsText);
 
-  // Respawn prompt (pulsing)
-  const respawn = scene.add.text(sw/2, sh/2 + 60, 'PRESS R TO RESPAWN', {
-    fontSize: '18px', fill: '#44ff66', fontFamily: 'monospace', fontStyle: 'bold',
+  // Spectate prompt
+  const respawn = scene.add.text(sw/2, sh/2 + 60, 'GAME OVER — NEW MATCH STARTING SOON', {
+    fontSize: '14px', fill: '#aaaaaa', fontFamily: 'monospace',
   }).setScrollFactor(0).setDepth(D+1).setOrigin(0.5);
   scene.tweens.add({
     targets: respawn, alpha: { from: 0.4, to: 1 }, duration: 600, yoyo: true, repeat: -1,
@@ -1702,14 +1710,13 @@ window.__game = {
   },
   sendInput(keys, angle) {
     if (!channel || !connected) return;
-    const inp = { seq: ++inputSeq, keys, angle: angle || 0 };
+    const inp = { seq: ++inputSeq, keys: { w: false, a: false, s: false, d: false, shift: false, ctrl: false, ...keys }, angle: angle || 0 };
     applyInput(inp, 1 / 60); pendingInputs.push(inp);
     channel.emit('input', inp);
   },
   moveTo(x, y) {
     const dx = x - predictedX, dy = y - predictedY;
     if (Math.hypot(dx, dy) < 10) { this.sendInput({ w: false, a: false, s: false, d: false }, 0); return false; }
-    // If actively engaged (shot in last 500ms), keep facing the target, not movement direction
     const moveAngle = Math.atan2(dy, dx);
     const useAngle = (this._engageTime && Date.now() - this._engageTime < 500) ? this._engageAngle : moveAngle;
     this.sendInput({ w: dy < -10, s: dy > 10, a: dx < -10, d: dx > 10 }, useAngle);
@@ -1767,12 +1774,12 @@ window.__game = {
       }
 
       // 2. Health management — use consumables when hurt
-      if (s.player.hp < 120 && s.player.inventory.consumables.length > 0) {
+      if (s.player.hp < 60 && s.player.inventory.consumables.length > 0) {
         channel.emit('use_item', { slot: 'consumable', index: 0 });
       }
 
       // 3. Tactical retreat — if low HP, flee from enemies
-      if (s.player.hp < 80) {
+      if (s.player.hp < 30) {
         const retreated = this.dodge();
         if (retreated) return;
       }
