@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tile Role Editor</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1a1a2e; color: #eee; font-family: monospace; display: flex; height: 100vh; }
+#left-panel { width: 55%; display: flex; flex-direction: column; border-right: 2px solid #444; }
+#right-panel { width: 45%; display: flex; flex-direction: column; }
+.panel-bar { padding: 6px 8px; border-bottom: 1px solid #333; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 11px; }
+.panel-bar button, .panel-bar select {
+  padding: 3px 8px; background: #2a2a4e; border: 1px solid #555; color: #ddd;
+  cursor: pointer; font-family: monospace; font-size: 11px; border-radius: 3px;
+}
+.panel-bar button:hover { background: #3a3a6e; }
+#status { padding: 4px 8px; color: #ffaa44; font-size: 11px; border-bottom: 1px solid #333; min-height: 20px; }
+.scroll-area { flex: 1; overflow: auto; position: relative; }
+canvas { image-rendering: pixelated; cursor: crosshair; }
+#output { width: 100%; height: 80px; background: #111; color: #4f4; border: 1px solid #444; font-family: monospace; font-size: 10px; padding: 4px; }
+#role-editor {
+  padding: 6px 8px; border-bottom: 1px solid #333; display: none; gap: 6px; align-items: center; font-size: 11px;
+}
+#role-editor.visible { display: flex; }
+#role-editor select { background: #222; color: #eee; border: 1px solid #555; padding: 2px 4px; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<div id="left-panel">
+  <div class="panel-bar">
+    <span style="color:#88aaff">TILESET</span>
+    <label>Zoom:</label>
+    <select id="ts-zoom" onchange="drawTileset()">
+      <option value="1" selected>1x</option><option value="2">2x</option><option value="3">3x</option>
+    </select>
+    <button id="ts-overlay-btn" onclick="toggleTsOverlay()">Overlays: ON</button>
+    <span id="ts-info" style="color:#888"></span>
+  </div>
+  <div id="status">Click a tile in the ROOM (right) to select it, then reassign its role or tileset tile</div>
+  <div class="scroll-area" id="ts-scroll"><canvas id="ts-canvas"></canvas></div>
+</div>
+
+<div id="right-panel">
+  <div class="panel-bar">
+    <span style="color:#88aaff">ROOM PREVIEW</span>
+    <label>Zoom:</label>
+    <select id="room-zoom" onchange="drawRoom()">
+      <option value="1" selected>1x</option><option value="2">2x</option><option value="3">3x</option>
+    </select>
+    <button id="room-overlay-btn" onclick="toggleRoomOverlay()">Overlays: ON</button>
+    <button onclick="exportJSON()" style="background:#336633">Export JSON</button>
+    <button onclick="copyJSON()" style="background:#333366">Copy JSON</button>
+    <button onclick="copyRoomLabels()" style="background:#553333">Copy Labels (before/after)</button>
+  </div>
+  <div id="role-editor">
+    <span style="color:#ff88ff">Selected [<span id="sel-pos"></span>]:</span>
+    <span id="sel-original" style="color:#888"></span>
+    <span>→</span>
+    <select id="role-select" onchange="onRoleChange()"></select>
+    <button onclick="clearOverride()" style="background:#553333">Reset</button>
+  </div>
+  <div class="scroll-area" id="room-scroll"><canvas id="room-canvas"></canvas></div>
+  <div style="padding:6px;border-top:1px solid #333"><textarea id="output" readonly></textarea></div>
+</div>
+
+<script>
+const T = 48;
+let rpgImg = null;
+let tsCols = 0, tsRows = 0;
+let tsOverlay = true, roomOverlay = true;
+
+function toggleTsOverlay() {
+  tsOverlay = !tsOverlay;
+  document.getElementById('ts-overlay-btn').textContent = 'Overlays: ' + (tsOverlay ? 'ON' : 'OFF');
+  drawTileset();
+}
+function toggleRoomOverlay() {
+  roomOverlay = !roomOverlay;
+  document.getElementById('room-overlay-btn').textContent = 'Overlays: ' + (roomOverlay ? 'ON' : 'OFF');
+  drawRoom();
+}
+
+// ── All possible roles ──
+const ALL_ROLES = [
+  'void','floor','floor_n','floor_s','floor_e','floor_w',
+  'floor_ne','floor_nw','floor_se','floor_sw',
+  'floor_corner_ne','floor_corner_nw','floor_corner_se','floor_corner_sw',
+  'wall_top','wall_bot',
+  'wall_top_nw','wall_bot_nw','wall_top_ne','wall_bot_ne',
+  'wall_s','wall_e','wall_w','wall_sw','wall_se',
+  'wall_corner_tl','wall_corner_tr','wall_corner_bl','wall_corner_br',
+  'wall_topcorner_tl','wall_topcorner_tr',
+];
+
+const tileMap = {
+  void:              { col: -1, row: -1 },
+  floor:             { col: 33, row: 4 },
+  floor_n:           { col: 33, row: 3 },
+  floor_s:           { col: 33, row: 5 },
+  floor_e:           { col: 34, row: 4 },
+  floor_w:           { col: 32, row: 4 },
+  floor_ne:          { col: 34, row: 3 },
+  floor_nw:          { col: 32, row: 3 },
+  floor_se:          { col: 34, row: 5 },
+  floor_sw:          { col: 32, row: 5 },
+  floor_corner_ne:   { col: 33, row: 4 },
+  floor_corner_nw:   { col: 33, row: 4 },
+  floor_corner_se:   { col: 33, row: 4 },
+  floor_corner_sw:   { col: 33, row: 4 },
+  wall_top:          { col: 1, row: 5 },
+  wall_bot:          { col: 1, row: 6 },
+  wall_top_nw:       { col: 54, row: 51 },
+  wall_bot_nw:       { col: 54, row: 52 },
+  wall_top_ne:       { col: 46, row: 64 },
+  wall_bot_ne:       { col: 46, row: 65 },
+  wall_s:            { col: 7, row: 6 },
+  wall_e:            { col: -1, row: -1 },
+  wall_w:            { col: 45, row: 66 },
+  wall_sw:           { col: -1, row: -1 },
+  wall_se:           { col: -1, row: -1 },
+  wall_corner_tl:    { col: 53, row: 52 },
+  wall_corner_tr:    { col: -1, row: -1 },
+  wall_corner_bl:    { col: 6, row: 6 },
+  wall_corner_br:    { col: -1, row: -1 },
+  wall_topcorner_tl: { col: 45, row: 62 },
+  wall_topcorner_tr: { col: -1, row: -1 },
+};
+
+// Populate role dropdown
+const roleSelect = document.getElementById('role-select');
+for (const role of ALL_ROLES) {
+  const opt = document.createElement('option');
+  opt.value = role; opt.textContent = role;
+  roleSelect.appendChild(opt);
+}
+
+// ── Room layout ──
+const ROOM_W = 17, ROOM_H = 16;
+// Store original auto-generated roles AND user overrides
+let originalLayout = null; // built once
+const overrides = {}; // "r,c" -> role (user corrections)
+
+function buildRoomLayout() {
+  const V = 0, F = 1, W = 2;
+  const floors = new Set();
+  function addFloor(r,c) { floors.add(`${r},${c}`); }
+  for (let r = 5; r <= 10; r++) for (let c = 4; c <= 9; c++) addFloor(r,c);
+  for (let r = 7; r <= 13; r++) for (let c = 10; c <= 13; c++) addFloor(r,c);
+  for (let r = 9; r <= 11; r++) for (let c = 2; c <= 3; c++) addFloor(r,c);
+  for (let r = 11; r <= 13; r++) for (let c = 5; c <= 7; c++) addFloor(r,c);
+  addFloor(11, 4); // connection between left wing and corridor
+
+  const grid = Array.from({length: ROOM_H}, () => new Uint8Array(ROOM_W));
+  for (const key of floors) { const [r,c] = key.split(',').map(Number); grid[r][c] = F; }
+  for (const key of floors) {
+    const [r,c] = key.split(',').map(Number);
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      if (!dr && !dc) continue;
+      const nr=r+dr, nc=c+dc;
+      if (nr>=0 && nc>=0 && nr<ROOM_H && nc<ROOM_W && grid[nr][nc]===V) grid[nr][nc]=W;
+    }
+  }
+  const extraWalls = [];
+  for (let r=0;r<ROOM_H;r++) for (let c=0;c<ROOM_W;c++) {
+    if (grid[r][c]===W && r+1<ROOM_H && grid[r+1][c]===F && r-1>=0 && grid[r-1][c]===V)
+      extraWalls.push([r-1,c]);
+  }
+  for (const [r,c] of extraWalls) {
+    grid[r][c]=W;
+    for (const dc of [-1,1]) if(c+dc>=0 && c+dc<ROOM_W && grid[r][c+dc]===V) grid[r][c+dc]=W;
+  }
+
+  function get(r,c) { return (r<0||c<0||r>=ROOM_H||c>=ROOM_W) ? V : grid[r][c]; }
+
+  const isWallBot = Array.from({length:ROOM_H},()=>new Uint8Array(ROOM_W));
+  for(let r=0;r<ROOM_H;r++) for(let c=0;c<ROOM_W;c++)
+    if(grid[r][c]===W && get(r+1,c)===F) isWallBot[r][c]=1;
+
+  const isWallTop = Array.from({length:ROOM_H},()=>new Uint8Array(ROOM_W));
+  for(let r=0;r<ROOM_H;r++) for(let c=0;c<ROOM_W;c++)
+    if(grid[r][c]===W && r+1<ROOM_H && isWallBot[r+1][c]) isWallTop[r][c]=1;
+
+  const isCornerBot = Array.from({length:ROOM_H},()=>new Array(ROOM_W).fill(null));
+  for(let r=0;r<ROOM_H;r++) for(let c=0;c<ROOM_W;c++) {
+    if(grid[r][c]!==W || isWallBot[r][c] || isWallTop[r][c]) continue;
+    const hN=get(r-1,c)===F,hS=get(r+1,c)===F,hE=get(r,c+1)===F,hW=get(r,c-1)===F;
+    if(hN||hS||hE||hW) continue;
+    if(get(r+1,c+1)===F) isCornerBot[r][c]='tl';
+    else if(get(r+1,c-1)===F) isCornerBot[r][c]='tr';
+  }
+  const isCornerTop = Array.from({length:ROOM_H},()=>new Array(ROOM_W).fill(null));
+  for(let r=0;r<ROOM_H;r++) for(let c=0;c<ROOM_W;c++) {
+    if(r+1<ROOM_H && isCornerBot[r+1][c]) {
+      if(grid[r][c]===V) grid[r][c]=W;
+      if(!isWallBot[r][c]&&!isWallTop[r][c]) isCornerTop[r][c]=isCornerBot[r+1][c];
+    }
+  }
+
+  const result = [];
+  for(let r=0;r<ROOM_H;r++) {
+    const row = [];
+    for(let c=0;c<ROOM_W;c++) {
+      const tile=grid[r][c];
+      if(tile===V){row.push({role:'void',label:''});continue;}
+      if(tile===F){
+        const wN=get(r-1,c)===W,wS=get(r+1,c)===W,wE=get(r,c+1)===W,wW=get(r,c-1)===W;
+        const wNE=get(r-1,c+1)===W,wNW=get(r-1,c-1)===W,wSE=get(r+1,c+1)===W,wSW=get(r+1,c-1)===W;
+        let role='floor',lbl='F';
+        if(wN&&wW){role='floor_nw';lbl='F nw';}
+        else if(wN&&wE){role='floor_ne';lbl='F ne';}
+        else if(wS&&wW){role='floor_sw';lbl='F sw';}
+        else if(wS&&wE){role='floor_se';lbl='F se';}
+        else if(wN){role='floor_n';lbl='F n';}
+        else if(wS){role='floor_s';lbl='F s';}
+        else if(wE){role='floor_e';lbl='F e';}
+        else if(wW){role='floor_w';lbl='F w';}
+        else if(wNW){role='floor_corner_nw';lbl='F*nw';}
+        else if(wNE){role='floor_corner_ne';lbl='F*ne';}
+        else if(wSW){role='floor_corner_sw';lbl='F*sw';}
+        else if(wSE){role='floor_corner_se';lbl='F*se';}
+        row.push({role,label:lbl});continue;
+      }
+      if(isWallBot[r][c]){
+        // Inside corners: wall face tile with FLOOR directly to its left or right
+        // (not another wall_top/bot, not a diagonal corner — actual floor)
+        const floorLeft = c>0 && get(r,c-1)===F;
+        const floorRight = c<ROOM_W-1 && get(r,c+1)===F;
+        if(floorLeft) row.push({role:'wall_bot_nw',label:'WB nw'});
+        else if(floorRight) row.push({role:'wall_bot_ne',label:'WB ne'});
+        else row.push({role:'wall_bot',label:'WB'});
+      } else if(isWallTop[r][c]){
+        // Same check: floor directly to left or right
+        const floorLeft = c>0 && get(r,c-1)===F;
+        const floorRight = c<ROOM_W-1 && get(r,c+1)===F;
+        if(floorLeft) row.push({role:'wall_top_nw',label:'WT nw'});
+        else if(floorRight) row.push({role:'wall_top_ne',label:'WT ne'});
+        else row.push({role:'wall_top',label:'WT'});
+      } else if(isCornerTop[r][c]){
+        row.push({role:'wall_topcorner_'+isCornerTop[r][c],label:'WT*'+isCornerTop[r][c]});
+      } else {
+        const hN=get(r-1,c)===F,hE=get(r,c+1)===F,hW=get(r,c-1)===F;
+        // Inside corners: wall with floor to north AND east/west = concave corner
+        if(hN && hE) row.push({role:'wall_sw',label:'W sw'});
+        else if(hN && hW) row.push({role:'wall_se',label:'W se'});
+        else if(hN) row.push({role:'wall_s',label:'W s'});
+        else if(hE) row.push({role:'wall_w',label:'W w'});
+        else if(hW) row.push({role:'wall_e',label:'W e'});
+        else {
+          const dne=get(r-1,c+1)===F,dnw=get(r-1,c-1)===F;
+          const dse=get(r+1,c+1)===F,dsw=get(r+1,c-1)===F;
+          if(dse) row.push({role:'wall_corner_tl',label:'W*tl'});
+          else if(dsw) row.push({role:'wall_corner_tr',label:'W*tr'});
+          else if(dne) row.push({role:'wall_corner_bl',label:'W*bl'});
+          else if(dnw) row.push({role:'wall_corner_br',label:'W*br'});
+          else row.push({role:'void',label:''});
+        }
+      }
+    }
+    result.push(row);
+  }
+  return result;
+}
+
+originalLayout = buildRoomLayout();
+
+// Get effective role for a cell (override or original)
+function getRole(r, c) {
+  const key = `${r},${c}`;
+  return overrides[key] || originalLayout[r][c].role;
+}
+function getLabel(role) {
+  const SHORT = {
+    void:'',floor:'F',floor_n:'F n',floor_s:'F s',floor_e:'F e',floor_w:'F w',
+    floor_ne:'F ne',floor_nw:'F nw',floor_se:'F se',floor_sw:'F sw',
+    floor_corner_ne:'F*ne',floor_corner_nw:'F*nw',floor_corner_se:'F*se',floor_corner_sw:'F*sw',
+    wall_top:'WT',wall_bot:'WB',
+    wall_top_nw:'WT nw',wall_bot_nw:'WB nw',wall_top_ne:'WT ne',wall_bot_ne:'WB ne',
+    wall_s:'W s',wall_e:'W e',wall_w:'W w',wall_sw:'W sw',wall_se:'W se',
+    wall_corner_tl:'W*tl',wall_corner_tr:'W*tr',wall_corner_bl:'W*bl',wall_corner_br:'W*br',
+    wall_topcorner_tl:'WT*tl',wall_topcorner_tr:'WT*tr',
+  };
+  return SHORT[role] || role;
+}
+
+let selectedRoomCell = null;
+
+const img = new Image();
+img.src = 'assets/limzu/rpgmaker_tileset.png';
+img.onload = () => {
+  rpgImg = img;
+  tsCols = Math.floor(img.width / T);
+  tsRows = Math.floor(img.height / T);
+  document.getElementById('ts-info').textContent = `${tsCols}×${tsRows} tiles`;
+  drawTileset(); drawRoom();
+};
+
+function drawTileset() {
+  if (!rpgImg) return;
+  const zoom = parseInt(document.getElementById('ts-zoom').value);
+  const cvs = document.getElementById('ts-canvas');
+  const sz = T * zoom;
+  cvs.width = tsCols * sz; cvs.height = tsRows * sz;
+  const ctx = cvs.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(rpgImg, 0, 0, rpgImg.width, rpgImg.height, 0, 0, cvs.width, cvs.height);
+
+  if (tsOverlay) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1;
+    for (let c=0;c<=tsCols;c++){ctx.beginPath();ctx.moveTo(c*sz,0);ctx.lineTo(c*sz,cvs.height);ctx.stroke();}
+    for (let r=0;r<=tsRows;r++){ctx.beginPath();ctx.moveTo(0,r*sz);ctx.lineTo(cvs.width,r*sz);ctx.stroke();}
+    const usedSet = new Set();
+    for (const pos of Object.values(tileMap)) if(pos.col>=0) usedSet.add(`${pos.col},${pos.row}`);
+    for (const key of usedSet) {
+      const [c,r]=key.split(',').map(Number);
+      ctx.strokeStyle='#44ff44';ctx.lineWidth=2;ctx.strokeRect(c*sz+1,r*sz+1,sz-2,sz-2);
+    }
+    if (selectedRoomCell) {
+      const role = getRole(selectedRoomCell.r, selectedRoomCell.c);
+      const pos = tileMap[role];
+      if (pos && pos.col>=0) {
+        ctx.strokeStyle='#ff44ff';ctx.lineWidth=3;ctx.strokeRect(pos.col*sz,pos.row*sz,sz,sz);
+        ctx.fillStyle='rgba(255,0,255,0.15)';ctx.fillRect(pos.col*sz,pos.row*sz,sz,sz);
+      }
+    }
+    ctx.font=`${Math.max(8,zoom*5)}px monospace`;ctx.textBaseline='bottom';
+    for (const [role,pos] of Object.entries(tileMap)) {
+      if(pos.col<0) continue;
+      ctx.fillStyle='rgba(0,0,0,0.7)';ctx.fillRect(pos.col*sz,(pos.row+1)*sz-Math.max(10,zoom*7),sz,Math.max(10,zoom*7));
+      ctx.fillStyle='#4f4';ctx.fillText(role.replace('floor_','F_').replace('wall_','W_'),pos.col*sz+2,(pos.row+1)*sz-2);
+    }
+  }
+}
+
+function drawRoom() {
+  if (!rpgImg) return;
+  const zoom = parseInt(document.getElementById('room-zoom').value);
+  const cvs = document.getElementById('room-canvas');
+  const sz = T * zoom;
+  cvs.width = ROOM_W * sz; cvs.height = ROOM_H * sz;
+  const ctx = cvs.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  for (let r=0;r<ROOM_H;r++) for (let c=0;c<ROOM_W;c++) {
+    const role = getRole(r,c);
+    const dx=c*sz, dy=r*sz;
+    const pos = tileMap[role];
+    const isOverridden = !!overrides[`${r},${c}`];
+
+    if (role==='void') { ctx.fillStyle='#000';ctx.fillRect(dx,dy,sz,sz); }
+    else if (pos && pos.col>=0) { ctx.drawImage(rpgImg,pos.col*T,pos.row*T,T,T,dx,dy,sz,sz); }
+    else {
+      ctx.fillStyle='#000';ctx.fillRect(dx,dy,sz,sz);
+      ctx.fillStyle='#32324a';
+      const bw=Math.max(2,zoom*2);
+      if(role==='wall_s') ctx.fillRect(dx,dy,sz,bw);
+      else if(role==='wall_w') ctx.fillRect(dx+sz-bw,dy,bw,sz);
+      else if(role==='wall_e') ctx.fillRect(dx,dy,bw,sz);
+      else if(role==='wall_sw'){ctx.fillRect(dx+sz-bw,dy,bw,sz);ctx.fillRect(dx,dy,sz,bw);}
+      else if(role==='wall_se'){ctx.fillRect(dx,dy,bw,sz);ctx.fillRect(dx,dy,sz,bw);}
+      else {ctx.fillStyle='#1a1a2e';ctx.fillRect(dx,dy,sz,sz);}
+    }
+
+    if (roomOverlay) {
+      const label = getLabel(role);
+      if (label) {
+        ctx.fillStyle = isOverridden ? 'rgba(100,0,0,0.6)' : 'rgba(0,0,0,0.5)';
+        ctx.fillRect(dx,dy,sz,sz>40?14:10);
+        ctx.font=`${sz>40?10:7}px monospace`;
+        ctx.fillStyle = isOverridden ? '#ff8' : '#fff';
+        ctx.textBaseline='top';
+        ctx.fillText(label,dx+2,dy+1);
+      }
+      if(selectedRoomCell && selectedRoomCell.r===r && selectedRoomCell.c===c){
+        ctx.strokeStyle='#ff44ff';ctx.lineWidth=3;ctx.strokeRect(dx+1,dy+1,sz-2,sz-2);
+      }
+    }
+  }
+}
+
+// ── Click handlers ──
+document.getElementById('ts-canvas').addEventListener('click', (e) => {
+  const zoom=parseInt(document.getElementById('ts-zoom').value);
+  const sz=T*zoom;
+  const rect=e.target.getBoundingClientRect();
+  const col=Math.floor((e.clientX-rect.left)/sz), row=Math.floor((e.clientY-rect.top)/sz);
+  if(!selectedRoomCell){
+    document.getElementById('status').textContent=`Select a room tile first. Tileset (${col},${row})`;
+    return;
+  }
+  const role=getRole(selectedRoomCell.r,selectedRoomCell.c);
+  tileMap[role]={col,row};
+  document.getElementById('status').textContent=`Updated "${role}" → (${col},${row})`;
+  drawTileset();drawRoom();
+});
+
+document.getElementById('room-canvas').addEventListener('click', (e) => {
+  const zoom=parseInt(document.getElementById('room-zoom').value);
+  const sz=T*zoom;
+  const rect=e.target.getBoundingClientRect();
+  const c=Math.floor((e.clientX-rect.left)/sz), r=Math.floor((e.clientY-rect.top)/sz);
+  if(r<0||c<0||r>=ROOM_H||c>=ROOM_W) return;
+  const role = getRole(r,c);
+  if(role==='void') return;
+
+  selectedRoomCell = {r,c};
+  const origRole = originalLayout[r][c].role;
+  const isOverridden = !!overrides[`${r},${c}`];
+  document.getElementById('status').textContent=`[${r},${c}] role="${role}"${isOverridden?' (overridden from "'+origRole+'")':''}`;
+
+  // Show role editor
+  const editor = document.getElementById('role-editor');
+  editor.classList.add('visible');
+  document.getElementById('sel-pos').textContent=`${r},${c}`;
+  document.getElementById('sel-original').textContent=`orig: ${origRole}`;
+  roleSelect.value = role;
+
+  drawTileset();drawRoom();
+});
+
+document.getElementById('ts-canvas').addEventListener('mousemove', (e) => {
+  const zoom=parseInt(document.getElementById('ts-zoom').value);
+  const sz=T*zoom;
+  const rect=e.target.getBoundingClientRect();
+  const col=Math.floor((e.clientX-rect.left)/sz), row=Math.floor((e.clientY-rect.top)/sz);
+  document.getElementById('ts-info').textContent=`${tsCols}×${tsRows} | (${col},${row})`;
+});
+
+function onRoleChange() {
+  if(!selectedRoomCell) return;
+  const newRole = roleSelect.value;
+  const key = `${selectedRoomCell.r},${selectedRoomCell.c}`;
+  const origRole = originalLayout[selectedRoomCell.r][selectedRoomCell.c].role;
+  if (newRole === origRole) { delete overrides[key]; }
+  else { overrides[key] = newRole; }
+  document.getElementById('status').textContent=`[${selectedRoomCell.r},${selectedRoomCell.c}] changed to "${newRole}"`;
+  drawRoom();
+}
+
+function clearOverride() {
+  if(!selectedRoomCell) return;
+  const key = `${selectedRoomCell.r},${selectedRoomCell.c}`;
+  delete overrides[key];
+  const origRole = originalLayout[selectedRoomCell.r][selectedRoomCell.c].role;
+  roleSelect.value = origRole;
+  document.getElementById('status').textContent=`[${selectedRoomCell.r},${selectedRoomCell.c}] reset to "${origRole}"`;
+  drawRoom();
+}
+
+function exportJSON() { document.getElementById('output').value=JSON.stringify(tileMap,null,2); }
+function copyJSON() {
+  exportJSON();
+  navigator.clipboard.writeText(document.getElementById('output').value).then(()=>{
+    document.getElementById('status').textContent='Copied JSON!';
+  });
+}
+
+function copyRoomLabels() {
+  const pad = 7;
+  const hasOverrides = Object.keys(overrides).length > 0;
+
+  const lines = [];
+  if (hasOverrides) lines.push('=== BEFORE (auto-generated) ===');
+  for (let r=0;r<ROOM_H;r++) {
+    const cells = [];
+    for (let c=0;c<ROOM_W;c++) cells.push((getLabel(originalLayout[r][c].role)||'.').padEnd(pad));
+    lines.push(cells.join(''));
+  }
+
+  if (hasOverrides) {
+    lines.push('');
+    lines.push('=== AFTER (with corrections) ===');
+    for (let r=0;r<ROOM_H;r++) {
+      const cells = [];
+      for (let c=0;c<ROOM_W;c++) {
+        const role = getRole(r,c);
+        const isOvr = !!overrides[`${r},${c}`];
+        const lbl = (getLabel(role)||'.').padEnd(pad);
+        cells.push(isOvr ? lbl.toUpperCase() : lbl);
+      }
+      lines.push(cells.join(''));
+    }
+    lines.push('');
+    lines.push('=== CHANGES ===');
+    for (const [key, newRole] of Object.entries(overrides)) {
+      const [r,c] = key.split(',').map(Number);
+      const origRole = originalLayout[r][c].role;
+      lines.push(`[${r},${c}]: ${origRole} → ${newRole}`);
+    }
+  }
+
+  navigator.clipboard.writeText(lines.join('\n')).then(()=>{
+    document.getElementById('status').textContent='Room labels copied (before'+(hasOverrides?'+after':'')+ ')!';
+  });
+}
+</script>
+</body>
+</html>
