@@ -8,13 +8,16 @@ const TILE_PX = 48;
 let nextBotId = 0;
 
 // Weapon tier ranking for _pickBestWeapon
-const WEAPON_TIER = { pistol: 1, smg: 2, shotgun: 3, sniper: 4 };
+const WEAPON_TIER = { pistol: 1, smg: 2, shotgun: 3, ar: 4, dmr: 5, lmg: 5, sniper: 6 };
 
 // Optimal engagement ranges per weapon type [min, max]
 const ENGAGE_RANGE = {
   pistol:  [200, 350],
   smg:     [150, 300],
   shotgun: [60,  150],
+  ar:      [200, 450],
+  lmg:     [150, 400],
+  dmr:     [300, 600],
   sniper:  [400, 800],
 };
 
@@ -126,38 +129,27 @@ class Bot {
   _updatePerception(gameState, pathfinder) {
     const { players, bots } = gameState;
 
-    // Scan enemies: prioritize PLAYERS, only target bots in specific situations
+    // Free-for-all: scan ALL enemies (players + bots) within aggro range + LOS
     const enemies = [];
 
-    // Always scan for players
     for (const [, p] of players) {
       if (!p.alive || p.hp <= 0) continue;
       const dist = this._dist(p.x, p.y);
       if (dist > this.aggroRange) continue;
       if (!this._checkLOS(p.x, p.y, pathfinder)) continue;
-      enemies.push({ id: p.id, x: p.x, y: p.y, hp: p.hp, dist, isPlayer: true });
+      enemies.push({ id: p.id, x: p.x, y: p.y, hp: p.hp, dist });
     }
 
-    // Only scan other bots if: we were already fighting one (retaliation),
-    // or for third-party opportunities (bot is low HP and fighting someone else)
     for (const bot of bots) {
       if (bot === this || bot.hp <= 0) continue;
       const dist = this._dist(bot.x, bot.y);
       if (dist > this.aggroRange) continue;
-      // Retaliate: if this bot was recently damaged AND the other bot is close
-      const isRetaliating = this.targetId === bot.id;
-      // Third-party: other bot is low HP (already in a fight)
-      const isVulnerable = bot.hp < 40 && bot.state === 'FIGHT';
-      if (!isRetaliating && !isVulnerable) continue;
       if (!this._checkLOS(bot.x, bot.y, pathfinder)) continue;
-      enemies.push({ id: bot.id, x: bot.x, y: bot.y, hp: bot.hp, dist, isPlayer: false });
+      enemies.push({ id: bot.id, x: bot.x, y: bot.y, hp: bot.hp, dist });
     }
 
-    // Sort: players first, then by distance
-    enemies.sort((a, b) => {
-      if (a.isPlayer !== b.isPlayer) return a.isPlayer ? -1 : 1;
-      return a.dist - b.dist;
-    });
+    // Sort by distance (closest threat first)
+    enemies.sort((a, b) => a.dist - b.dist);
     this.visibleEnemies = enemies;
 
     // Scan loot within 200px that isn't picked up

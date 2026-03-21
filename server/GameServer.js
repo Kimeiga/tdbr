@@ -3,7 +3,7 @@
 import { generateMap, isWalkable, MAP_SIZE, TILE_PX } from './MapGenerator.js';
 import { Bot } from './Bot.js';
 import { WEAPON_DEFS, fireHitscan, fireProjectile, updateProjectiles } from './WeaponSystem.js';
-import { spawnLoot, pickupLoot, createInventory, addToInventory, ITEM_DEFS } from './LootManager.js';
+import { spawnLoot, pickupLoot, createInventory, addToInventory, ITEM_DEFS, setWeaponDefs } from './LootManager.js';
 import { ZoneManager } from './ZoneManager.js';
 import { createPathfinder } from './Pathfinding.js';
 
@@ -15,9 +15,18 @@ const PLAYER_SPEED = 220; // px/s
 const PICKUP_RANGE = 40;
 const MAX_HISTORY = 60; // 1 second of snapshots
 
+// Helper: determine which inventory slot is active based on last fire slot
+function activeSlotForPlayer(p) {
+  // Use _activeSlot if set, default to primary
+  return p._activeSlot || 'primary';
+}
+
 export class GameServer {
   constructor(io) {
     this.io = io;
+
+    // Register weapon defs for LootManager ammo loading
+    setWeaponDefs(WEAPON_DEFS);
 
     // Generate map
     const { grid: flatGrid, walkable, wallVariants } = generateMap();
@@ -147,9 +156,17 @@ export class GameServer {
       alive: true,
       inputs: [], // pending input queue
       spawnProtection: 180, // 3 seconds at 60 ticks/s
+      reloading: false,
+      reloadEndTick: 0,
+      sprinting: false,
+      crouching: false,
+      boost: 0,
     };
-    // Give starting pistol
+    // Give starting pistol + ammo
     addToInventory(p.inventory, ITEM_DEFS.pistol);
+    p.inventory.ammo['9mm'] = (p.inventory.ammo['9mm'] || 0) + 60;
+    // Fill magazine
+    p.inventory.magAmmo.primary = WEAPON_DEFS.pistol.magSize;
     this.players.set(socket.id, p);
 
     // Send init data
@@ -182,6 +199,12 @@ export class GameServer {
       p.alive = true;
       p.spawnProtection = 180; // 3 seconds invulnerability
       p.inputs = [];
+      p.reloading = false;
+      p.boost = 0;
+      p.inventory = createInventory();
+      addToInventory(p.inventory, ITEM_DEFS.pistol);
+      p.inventory.ammo['9mm'] = 60;
+      p.inventory.magAmmo.primary = WEAPON_DEFS.pistol.magSize;
       this.events.push({ type: 'respawn', playerId: channelId });
       return;
     }
@@ -192,7 +215,11 @@ export class GameServer {
     const p = this.players.get(channelId);
     if (!p || !p.alive) return;
 
+    // Cannot fire while sprinting or reloading
+    if (p.sprinting || p.reloading) return;
+
     const weaponSlot = data.slot || 'primary';
+    p._activeSlot = weaponSlot; // track active slot for reload
     let itemDef;
     if (weaponSlot === 'tactical') {
       // Tactical is an array — use first item and consume it after fire
@@ -206,6 +233,23 @@ export class GameServer {
 
     const now = Date.now();
     if (now - p.lastFireTime < weaponDef.fireRate) return;
+
+    // Check magazine ammo for hitscan weapons
+    if (weaponDef.type === 'hitscan' && weaponDef.magSize) {
+      const currentMag = p.inventory.magAmmo[weaponSlot] || 0;
+      if (currentMag <= 0) {
+        // Auto-reload when trying to fire with empty mag
+        this.handleReload(channelId);
+        return;
+      }
+      p.inventory.magAmmo[weaponSlot] = currentMag - 1;
+      // Auto-reload when mag is now empty
+      if (p.inventory.magAmmo[weaponSlot] <= 0) {
+        // Queue auto-reload after this shot
+        setTimeout(() => this.handleReload(channelId), 0);
+      }
+    }
+
     p.lastFireTime = now;
 
     // Build entity list for hit detection (bots + other players)
@@ -245,11 +289,17 @@ export class GameServer {
       for (const result of results) {
         if (result && result.hit && result.target) {
           const targetId = result.target.id;
+          const isHeadshot = Math.random() < 0.15; // 15% headshot chance
+          let dmg = weaponDef.damage;
+          if (isHeadshot && weaponDef.headshotMult) {
+            dmg = Math.round(dmg * weaponDef.headshotMult);
+          }
           // Apply damage to actual entity (each pellet damages independently)
           const bot = this.bots.find(b => b.id === targetId);
           if (bot) {
-            const dead = bot.takeDamage(weaponDef.damage, this.tick);
-            this.events.push({ type: 'hit', targetType: 'bot', targetId, damage: weaponDef.damage, dead, x: bot.x, y: bot.y });
+            const finalDmg = this._applyDamage(bot, dmg, isHeadshot);
+            const dead = bot.takeDamage(finalDmg, this.tick);
+            this.events.push({ type: 'hit', targetType: 'bot', targetId, damage: finalDmg, dead, x: bot.x, y: bot.y, headshot: isHeadshot });
             if (dead) {
               this._onBotDeath(bot, channelId);
               this.killCounts.set(channelId, (this.killCounts.get(channelId) || 0) + 1);
@@ -257,14 +307,15 @@ export class GameServer {
           }
           const targetPlayer = this.players.get(targetId);
           if (targetPlayer && !this._isProtected(targetPlayer)) {
-            targetPlayer.hp -= weaponDef.damage;
+            const finalDmg = this._applyDamage(targetPlayer, dmg, isHeadshot);
+            targetPlayer.hp -= finalDmg;
             if (targetPlayer.hp <= 0) {
               targetPlayer.hp = 0;
               targetPlayer.alive = false;
               this.events.push({ type: 'kill', killerId: channelId, targetId });
               this.killCounts.set(channelId, (this.killCounts.get(channelId) || 0) + 1);
             }
-            this.events.push({ type: 'hit', targetType: 'player', targetId, damage: weaponDef.damage, x: targetPlayer.x, y: targetPlayer.y });
+            this.events.push({ type: 'hit', targetType: 'player', targetId, damage: finalDmg, x: targetPlayer.x, y: targetPlayer.y, headshot: isHeadshot });
           }
         }
         if (result && result.wallHit) {
@@ -313,6 +364,13 @@ export class GameServer {
       if (item.heals) {
         p.hp = Math.min(p.maxHp, p.hp + item.heals);
       }
+      if (item.healAmount) {
+        const cap = item.healCap || p.maxHp;
+        p.hp = Math.min(cap, p.hp + item.healAmount);
+      }
+      if (item.boostAmount) {
+        p.boost = Math.min(100, p.boost + item.boostAmount);
+      }
       if (item.effect === 'speed_boost') {
         p.speed = PLAYER_SPEED * 1.5;
         setTimeout(() => { if (p) p.speed = PLAYER_SPEED; }, 10000);
@@ -320,6 +378,71 @@ export class GameServer {
       p.inventory.consumables.splice(data.index, 1);
       this.events.push({ type: 'use_item', playerId: channelId, itemId: item.id });
     }
+  }
+
+  handleReload(channelId) {
+    const p = this.players.get(channelId);
+    if (!p || !p.alive || p.reloading) return;
+
+    const slotName = activeSlotForPlayer(p);
+    const itemDef = p.inventory[slotName];
+    if (!itemDef) return;
+    const weaponDef = WEAPON_DEFS[itemDef.id];
+    if (!weaponDef || !weaponDef.magSize) return;
+
+    const currentMag = p.inventory.magAmmo[slotName] || 0;
+    if (currentMag >= weaponDef.magSize) return; // already full
+
+    const ammoType = weaponDef.ammoType;
+    const reserve = p.inventory.ammo[ammoType] || 0;
+    if (reserve <= 0) return; // no ammo
+
+    p.reloading = true;
+    const reloadTicks = Math.ceil((weaponDef.reloadTime / 1000) * TICK_RATE);
+    p.reloadEndTick = this.tick + reloadTicks;
+  }
+
+  _completeReload(p) {
+    const slotName = activeSlotForPlayer(p);
+    const itemDef = p.inventory[slotName];
+    if (!itemDef) { p.reloading = false; return; }
+    const weaponDef = WEAPON_DEFS[itemDef.id];
+    if (!weaponDef || !weaponDef.magSize) { p.reloading = false; return; }
+
+    const currentMag = p.inventory.magAmmo[slotName] || 0;
+    const needed = weaponDef.magSize - currentMag;
+    const ammoType = weaponDef.ammoType;
+    const reserve = p.inventory.ammo[ammoType] || 0;
+    const load = Math.min(needed, reserve);
+
+    p.inventory.magAmmo[slotName] = currentMag + load;
+    p.inventory.ammo[ammoType] = reserve - load;
+    p.reloading = false;
+  }
+
+  _applyDamage(target, rawDamage, isHeadshot) {
+    let damage = rawDamage;
+    // Check vest for body shots
+    if (!isHeadshot && target.inventory && target.inventory.vest) {
+      const vest = target.inventory.vest;
+      const reduced = Math.floor(damage * vest.damageReduction);
+      damage -= reduced;
+      vest.durability -= reduced;
+      if (vest.durability <= 0) {
+        target.inventory.vest = null;
+      }
+    }
+    // Check helmet for headshots
+    if (isHeadshot && target.inventory && target.inventory.helmet) {
+      const helmet = target.inventory.helmet;
+      const reduced = Math.floor(damage * helmet.damageReduction);
+      damage -= reduced;
+      helmet.durability -= reduced;
+      if (helmet.durability <= 0) {
+        target.inventory.helmet = null;
+      }
+    }
+    return Math.max(1, damage);
   }
 
   _isProtected(p) {
@@ -353,8 +476,16 @@ export class GameServer {
           vy *= 0.7071;
         }
 
-        const moveX = vx * p.speed * dt;
-        const moveY = vy * p.speed * dt;
+        // Sprint / crouch from input
+        p.sprinting = !!(input.keys && input.keys.shift) && (vx !== 0 || vy !== 0);
+        p.crouching = !!(input.keys && input.keys.ctrl) && !p.sprinting;
+
+        let effectiveSpeed = p.speed;
+        if (p.sprinting) effectiveSpeed *= 1.5;
+        if (p.crouching) effectiveSpeed *= 0.5;
+
+        const moveX = vx * effectiveSpeed * dt;
+        const moveY = vy * effectiveSpeed * dt;
 
         // Bounding box collision with axis sliding and corner nudge
         if (this._isWalkableForChar(p.x + moveX, p.y + moveY)) {
@@ -539,11 +670,20 @@ export class GameServer {
     return {
       id: p.id, x: p.x, y: p.y, angle: p.angle, hp: p.hp,
       alive: p.alive, lastSeq: p.lastSeq,
+      reloading: p.reloading,
+      reloadEndTick: p.reloadEndTick,
+      sprinting: p.sprinting,
+      crouching: p.crouching,
+      boost: p.boost,
+      vestLevel: p.inventory.vest ? p.inventory.vest.level : 0,
+      helmetLevel: p.inventory.helmet ? p.inventory.helmet.level : 0,
       inventory: {
         primary: p.inventory.primary?.id || null,
         secondary: p.inventory.secondary?.id || null,
         tactical: p.inventory.tactical.map(i => i.id),
         consumables: p.inventory.consumables.map(i => i.id),
+        ammo: p.inventory.ammo,
+        magAmmo: p.inventory.magAmmo,
       }
     };
   }
@@ -593,6 +733,29 @@ export class GameServer {
     // Decrement spawn protection
     for (const [, p] of this.players) {
       if (p.spawnProtection > 0) p.spawnProtection--;
+    }
+
+    // Check reload completion
+    for (const [, p] of this.players) {
+      if (p.reloading && this.tick >= p.reloadEndTick) {
+        this._completeReload(p);
+      }
+    }
+
+    // Boost system: heal + decay
+    for (const [, p] of this.players) {
+      if (!p.alive) continue;
+      if (p.boost > 0) {
+        // Heal based on boost level (per tick)
+        let healRate = 0;
+        if (p.boost > 80) healRate = 4;       // ~4 hp/s at high boost
+        else if (p.boost > 60) healRate = 3;
+        else if (p.boost > 30) healRate = 2;
+        else healRate = 1;
+        p.hp = Math.min(p.maxHp, p.hp + healRate * dt);
+        // Decay boost ~1/second
+        p.boost = Math.max(0, p.boost - dt);
+      }
     }
 
     // Process player inputs
@@ -665,12 +828,93 @@ export class GameServer {
       }
     }
 
+    // Auto-restart: when all human players are dead, countdown then reset
+    if (this.players.size > 0) {
+      const anyAlive = [...this.players.values()].some(p => p.alive);
+      if (!anyAlive) {
+        if (!this._restartCountdown) {
+          this._restartCountdown = this.tick + TICK_RATE * 5; // 5 seconds
+          this.events.push({ type: 'restart_countdown', seconds: 5 });
+        }
+        if (this.tick >= this._restartCountdown) {
+          this._restartCountdown = null;
+          this._resetGame();
+        }
+      } else {
+        this._restartCountdown = null;
+      }
+    }
+
     // Save snapshot for lag comp
     this._saveSnapshot();
 
     // Broadcast at reduced rate
     if (this.tick % BROADCAST_EVERY === 0) {
       this._broadcast();
+    }
+  }
+
+  _resetGame() {
+    console.log('Auto-restart: regenerating map...');
+    // Regenerate map
+    const { grid: flatGrid, walkable, wallVariants } = generateMap();
+    this.flatGrid = flatGrid;
+    this.walkable = walkable;
+    this.wallVariants = wallVariants;
+    this.mapGrid = [];
+    for (let r = 0; r < MAP_SIZE; r++) {
+      this.mapGrid[r] = new Array(MAP_SIZE);
+      for (let c = 0; c < MAP_SIZE; c++) {
+        this.mapGrid[r][c] = flatGrid[r * MAP_SIZE + c];
+      }
+    }
+
+    // Reset bots
+    this.bots = [];
+    this._spawnBots();
+
+    // Reset loot
+    this.loot = spawnLoot(this.mapGrid, MAP_SIZE);
+
+    // Reset zone
+    this.zone = new ZoneManager(MAP_SIZE, TILE_PX);
+
+    // Reset pathfinder
+    this.pathfinder = createPathfinder(this.mapGrid, MAP_SIZE);
+
+    // Reset projectiles and state
+    this.projectiles = [];
+    this.stateHistory = [];
+    this.events = [];
+    this.killCounts = new Map();
+
+    // Respawn all connected players
+    for (const [, socket] of this.io.sockets.sockets) {
+      const p = this.players.get(socket.id);
+      if (p) {
+        const pos = this.getSpawnPos();
+        p.x = pos.x; p.y = pos.y;
+        p.hp = p.maxHp; p.alive = true;
+        p.spawnProtection = 180;
+        p.inputs = [];
+        p.reloading = false;
+        p.boost = 0;
+        p.inventory = createInventory();
+        addToInventory(p.inventory, ITEM_DEFS.pistol);
+        p.inventory.ammo['9mm'] = 60;
+        p.inventory.magAmmo.primary = WEAPON_DEFS.pistol.magSize;
+      }
+      socket.emit('init', {
+        playerId: socket.id,
+        map: Array.from(this.flatGrid),
+        mapSize: MAP_SIZE,
+        tilePx: TILE_PX,
+        playerState: this._serializePlayer(this.players.get(socket.id)),
+        bots: this.bots.map(b => b.serialize()),
+        loot: this.loot.filter(l => !l.pickedUp),
+        zone: this.zone.serialize(),
+        wallVariants: Array.from(this.wallVariants),
+      });
     }
   }
 

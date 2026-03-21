@@ -7,10 +7,13 @@ const ENTITY_HALF = 10; // 20x20 bounding box (thinner LimeZu characters)
 let nextProjectileId = 1;
 
 const WEAPON_DEFS = {
-  pistol:   { type: 'hitscan',    damage: 15, range: 500,  fireRate: 300,  spread: 0.05 },
-  smg:      { type: 'hitscan',    damage: 10, range: 400,  fireRate: 100,  spread: 0.12 },
-  shotgun:  { type: 'hitscan',    damage: 8,  pellets: 6,  range: 300, fireRate: 800, spread: 0.25 },
-  sniper:   { type: 'hitscan',    damage: 75, range: 1200, fireRate: 1500, spread: 0 },
+  pistol:   { type: 'hitscan',    damage: 15, range: 500,  fireRate: 300,  spread: 0.05, ammoType: '9mm',    magSize: 15, reloadTime: 1500, headshotMult: 2.0 },
+  smg:      { type: 'hitscan',    damage: 10, range: 400,  fireRate: 100,  spread: 0.12, ammoType: '9mm',    magSize: 30, reloadTime: 2000, headshotMult: 1.8 },
+  shotgun:  { type: 'hitscan',    damage: 8,  pellets: 6,  range: 300, fireRate: 800, spread: 0.25, ammoType: '12gauge', magSize: 5,  reloadTime: 2500, headshotMult: 1.5 },
+  sniper:   { type: 'hitscan',    damage: 75, range: 1200, fireRate: 1500, spread: 0,    ammoType: '300',    magSize: 5,  reloadTime: 3000, headshotMult: 3.0 },
+  ar:       { type: 'hitscan',    damage: 14, range: 600,  fireRate: 100,  spread: 0.04, ammoType: '556',    magSize: 30, reloadTime: 2200, headshotMult: 2.0 },
+  lmg:      { type: 'hitscan',    damage: 12, range: 500,  fireRate: 80,   spread: 0.12, ammoType: '762',    magSize: 75, reloadTime: 5000, headshotMult: 1.8 },
+  dmr:      { type: 'hitscan',    damage: 40, range: 700,  fireRate: 250,  spread: 0.02, ammoType: '762',    magSize: 10, reloadTime: 2500, headshotMult: 2.5 },
   grenade:  { type: 'projectile', damage: 50, radius: 120, speed: 400, fuseTime: 2000 },
 };
 

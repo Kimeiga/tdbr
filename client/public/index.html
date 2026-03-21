@@ -6,7 +6,7 @@
   <style>
     * { margin: 0; padding: 0; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #050510; }
-    /* Radial vignette for LOS feel */
+    /* Radial vignette — subtle, doesn't obscure UI */
     body::after {
       content: '';
       position: fixed;
@@ -14,11 +14,10 @@
       pointer-events: none;
       z-index: 999;
       background: radial-gradient(circle at 50% 50%,
-        transparent 30%,
-        rgba(0,0,0,0.15) 50%,
-        rgba(0,0,0,0.45) 70%,
-        rgba(0,0,0,0.75) 90%,
-        rgba(0,0,0,0.92) 100%
+        transparent 40%,
+        rgba(0,0,0,0.08) 60%,
+        rgba(0,0,0,0.2) 80%,
+        rgba(0,0,0,0.4) 100%
       );
     }
   </style>

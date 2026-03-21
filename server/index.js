@@ -64,6 +64,10 @@ io.on('connection', socket => {
     game.handleUseItem(socket.id, data);
   });
 
+  socket.on('reload', () => {
+    game.handleReload(socket.id);
+  });
+
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
     game.removePlayer(socket.id);

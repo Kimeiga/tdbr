@@ -5227,6 +5227,7 @@ void main() {
   var CHAR_NAMES = ["Adam", "Alex", "Amelia", "Bob"];
   var DIR_OFFSETS = { down: 0, up: 6, right: 12, left: 18 };
   function hashStr(s) {
+    s = String(s);
     let h = 0;
     for (let i = 0; i < s.length; i++) h = (h << 5) - h + s.charCodeAt(i) | 0;
     return Math.abs(h);
@@ -5282,6 +5283,11 @@ void main() {
   var killFeed = [];
   var zoneTimerText = null;
   var playerCountText = null;
+  var ammoText = null;
+  var reloadBarBg = null;
+  var reloadBarFill = null;
+  var armorText = null;
+  var aliveCountText = null;
   var smokeClouds = [];
   var RARITY_COLOR = { common: 13421772, rare: 4491519, epic: 11158783, legendary: 16755200 };
   var RARITY_GLOW = { common: 6710886, rare: 2254540, epic: 7807692, legendary: 13404160 };
@@ -5357,6 +5363,15 @@ void main() {
       case "sniper":
         playSound(150, "square", 0.2, 0.18);
         break;
+      case "ar":
+        playSound(250, "square", 0.06, 0.1);
+        break;
+      case "lmg":
+        playSound(180, "sawtooth", 0.05, 0.1);
+        break;
+      case "dmr":
+        playSound(160, "square", 0.15, 0.14);
+        break;
       default:
         playSound(250, "square", 0.06, 0.08);
     }
@@ -5381,11 +5396,29 @@ void main() {
     smg: "rare",
     shotgun: "rare",
     sniper: "epic",
+    ar: "rare",
+    lmg: "epic",
+    dmr: "epic",
     frag_grenade: "common",
     smoke_grenade: "common",
     medkit: "common",
     bandage: "common",
-    energy_drink: "rare"
+    energy_drink: "rare",
+    ammo_9mm: "common",
+    ammo_556: "common",
+    ammo_762: "common",
+    ammo_12gauge: "common",
+    ammo_300: "common",
+    first_aid_kit: "rare",
+    medkit_full: "rare",
+    painkiller: "rare",
+    adrenaline: "rare",
+    vest_1: "common",
+    vest_2: "rare",
+    vest_3: "epic",
+    helmet_1: "common",
+    helmet_2: "rare",
+    helmet_3: "epic"
   };
   function preload() {
     for (const name of CHAR_NAMES) {
@@ -5494,12 +5527,22 @@ void main() {
     scene.textures.addCanvas("tileset", canvas);
   }
   function getWeaponTexture(weaponId) {
-    const map = { pistol: "wpn_pistol", smg: "wpn_smg", shotgun: "wpn_shotgun", sniper: "wpn_sniper" };
+    const map = {
+      pistol: "wpn_pistol",
+      smg: "wpn_smg",
+      shotgun: "wpn_shotgun",
+      sniper: "wpn_sniper",
+      ar: "wpn_smg",
+      lmg: "wpn_shotgun",
+      dmr: "wpn_sniper"
+    };
     return map[weaponId] || null;
   }
   function create() {
     activeScene = this;
+    console.time("composeTileset");
     composeTileset(this);
+    console.timeEnd("composeTileset");
     const DIRS2 = ["down", "up", "right", "left"];
     for (const name of CHAR_NAMES) {
       for (const dir of DIRS2) {
@@ -5538,7 +5581,9 @@ void main() {
       two: Phaser.Input.Keyboard.KeyCodes.TWO,
       three: Phaser.Input.Keyboard.KeyCodes.THREE,
       four: Phaser.Input.Keyboard.KeyCodes.FOUR,
-      tab: Phaser.Input.Keyboard.KeyCodes.TAB
+      tab: Phaser.Input.Keyboard.KeyCodes.TAB,
+      shift: Phaser.Input.Keyboard.KeyCodes.SHIFT,
+      ctrl: Phaser.Input.Keyboard.KeyCodes.CTRL
     });
     const me = serverPlayers.find((p) => p.id === myId);
     if (me && !me.alive) {
@@ -5555,7 +5600,7 @@ void main() {
     const angle = Math.atan2(worldPoint.y - predictedY, worldPoint.x - predictedX);
     const input = {
       seq: ++inputSeq,
-      keys: { w: keys.w.isDown, a: keys.a.isDown, s: keys.s.isDown, d: keys.d.isDown },
+      keys: { w: keys.w.isDown, a: keys.a.isDown, s: keys.s.isDown, d: keys.d.isDown, shift: keys.shift.isDown, ctrl: keys.ctrl.isDown },
       angle
     };
     applyInput(input, 1 / 60);
@@ -5570,7 +5615,10 @@ void main() {
     } else {
       footstepTimer = 0;
     }
-    if (pointer.isDown) {
+    if (Phaser.Input.Keyboard.JustDown(keys.r)) {
+      channel.emit("reload");
+    }
+    if (pointer.isDown && !keys.shift.isDown) {
       channel.emit("fire", { angle, slot: activeSlot, latency });
     }
     if (Phaser.Input.Keyboard.JustDown(keys.e)) {
@@ -5622,6 +5670,7 @@ void main() {
       console.log("Connected");
     });
     channel.on("init", (data) => {
+      console.time("init_total");
       myId = data.playerId;
       gameStartTime = Date.now();
       mapData = data.map;
@@ -5641,8 +5690,16 @@ void main() {
           mapGrid2D[r][c] = mapData[r * mapSize + c];
         }
       }
+      if (scene._tileMapLayer) scene._tileMapLayer.destroy();
+      if (scene._debugLabels) {
+        for (const txt of scene._debugLabels) txt.destroy();
+      }
+      scene._debugLabels = [];
+      console.time("buildTilemap");
       buildTilemap(scene);
+      console.timeEnd("buildTilemap");
       buildFogOfWar(scene);
+      console.timeEnd("init_total");
       console.log(`Init: id=${myId} map=${mapSize}x${mapSize}`);
     });
     channel.on("state", (data) => {
@@ -5701,7 +5758,12 @@ void main() {
       vx *= 0.7071;
       vy *= 0.7071;
     }
-    const mx = vx * PLAYER_SPEED * dt, my = vy * PLAYER_SPEED * dt;
+    let speed = PLAYER_SPEED;
+    const isSprinting = input.keys.shift && (vx !== 0 || vy !== 0);
+    const isCrouching = input.keys.ctrl && !isSprinting;
+    if (isSprinting) speed *= 1.5;
+    if (isCrouching) speed *= 0.5;
+    const mx = vx * speed * dt, my = vy * speed * dt;
     if (clientIsWalkable(predictedX + mx, predictedY + my)) {
       predictedX += mx;
       predictedY += my;
@@ -5890,47 +5952,51 @@ void main() {
     }));
     const map = scene.make.tilemap({ data: displayGrid, tileWidth: TILE_PX, tileHeight: TILE_PX });
     const tileset = map.addTilesetImage("tileset", "tileset", TILE_PX, TILE_PX, 0, 0);
-    map.createLayer(0, tileset, 0, 0).setDepth(0);
-    const debugLabels = [];
+    scene._tileMapLayer = map.createLayer(0, tileset, 0, 0).setDepth(0);
+    const debugLabels = scene._debugLabels;
     let debugVisible = false;
+    let debugCreated = false;
+    const SHORT_LABELS = {
+      floor: "F",
+      floor_n: "Fn",
+      floor_s: "Fs",
+      floor_e: "Fe",
+      floor_w: "Fw",
+      floor_ne: "Fne",
+      floor_nw: "Fnw",
+      floor_se: "Fse",
+      floor_sw: "Fsw",
+      floor_corner_ne: "F*ne",
+      floor_corner_nw: "F*nw",
+      floor_corner_se: "F*se",
+      floor_corner_sw: "F*sw",
+      wall_top: "WT",
+      wall_bot: "WB",
+      wall_top_nw: "WTnw",
+      wall_bot_nw: "WBnw",
+      wall_top_ne: "WTne",
+      wall_bot_ne: "WBne",
+      wall_s: "Ws",
+      wall_e: "We",
+      wall_w: "Ww",
+      wall_sw: "Wsw",
+      wall_se: "Wse",
+      wall_corner_tl: "W*tl",
+      wall_corner_tr: "W*tr",
+      wall_corner_bl: "W*bl",
+      wall_corner_br: "W*br",
+      wall_topcorner_tl: "WT*tl",
+      wall_topcorner_tr: "WT*tr"
+    };
     function createDebugOverlay() {
+      if (debugCreated) return;
+      debugCreated = true;
+      console.time("createDebugOverlay");
       for (let r = 0; r < mapSize; r++) {
         for (let c = 0; c < mapSize; c++) {
           const role = roleGrid[r][c];
           if (role === "void") continue;
-          const SHORT = {
-            floor: "F",
-            floor_n: "Fn",
-            floor_s: "Fs",
-            floor_e: "Fe",
-            floor_w: "Fw",
-            floor_ne: "Fne",
-            floor_nw: "Fnw",
-            floor_se: "Fse",
-            floor_sw: "Fsw",
-            floor_corner_ne: "F*ne",
-            floor_corner_nw: "F*nw",
-            floor_corner_se: "F*se",
-            floor_corner_sw: "F*sw",
-            wall_top: "WT",
-            wall_bot: "WB",
-            wall_top_nw: "WTnw",
-            wall_bot_nw: "WBnw",
-            wall_top_ne: "WTne",
-            wall_bot_ne: "WBne",
-            wall_s: "Ws",
-            wall_e: "We",
-            wall_w: "Ww",
-            wall_sw: "Wsw",
-            wall_se: "Wse",
-            wall_corner_tl: "W*tl",
-            wall_corner_tr: "W*tr",
-            wall_corner_bl: "W*bl",
-            wall_corner_br: "W*br",
-            wall_topcorner_tl: "WT*tl",
-            wall_topcorner_tr: "WT*tr"
-          };
-          const label = SHORT[role] || role;
+          const label = SHORT_LABELS[role] || role;
           const isWall2 = role.startsWith("wall");
           const txt = scene.add.text(
             c * TILE_PX + TILE_PX / 2,
@@ -5944,16 +6010,15 @@ void main() {
               stroke: "#000000",
               strokeThickness: 2
             }
-          ).setOrigin(0.5).setDepth(3).setVisible(false);
+          ).setOrigin(0.5).setDepth(3);
           debugLabels.push(txt);
         }
       }
+      console.timeEnd("createDebugOverlay");
     }
-    createDebugOverlay();
-    debugVisible = true;
-    for (const txt of debugLabels) txt.setVisible(true);
     scene.input.keyboard.on("keydown-O", () => {
       debugVisible = !debugVisible;
+      if (debugVisible && !debugCreated) createDebugOverlay();
       for (const txt of debugLabels) txt.setVisible(debugVisible);
     });
     scene.input.keyboard.on("keydown-P", () => {
@@ -6008,14 +6073,16 @@ void main() {
       switch (ev.type) {
         case "fire": {
           const shooter = serverPlayers.find((p) => p.id === ev.shooterId);
-          const sx = shooter ? shooter.x : predictedX;
-          const sy = (shooter ? shooter.y : predictedY) - 16;
-          const endX = sx + Math.cos(ev.angle) * 500;
-          const endY = sy + Math.sin(ev.angle) * 500;
+          const baseX = shooter ? shooter.x : predictedX;
+          const baseY = shooter ? shooter.y : predictedY;
+          const sx = baseX + Math.cos(ev.angle) * 24;
+          const sy = baseY - 16 + Math.sin(ev.angle) * 24;
+          const endX = baseX + Math.cos(ev.angle) * 500;
+          const endY = baseY - 16 + Math.sin(ev.angle) * 500;
           drawTracer(scene, sx, sy, endX, endY);
           const flash = scene.add.sprite(
-            sx + Math.cos(ev.angle) * 20,
-            sy + Math.sin(ev.angle) * 20,
+            sx + Math.cos(ev.angle) * 8,
+            sy + Math.sin(ev.angle) * 8,
             "muzzle_flash"
           ).setDepth(46).setAlpha(0.9).setScale(0.8);
           scene.tweens.add({
@@ -6157,7 +6224,7 @@ void main() {
       if (!entry) {
         const charName = CHAR_NAMES[hashStr(p.id) % CHAR_NAMES.length];
         const body = scene.add.sprite(0, 0, `${charName}_idle`, 0).setDepth(20).setScale(CHAR_SCALE).setOrigin(0.5, 1);
-        const weapon = scene.add.sprite(0, 0, "wpn_pistol").setDepth(21).setScale(2.5).setOrigin(0, 0.5).setVisible(false);
+        const weapon = scene.add.sprite(0, 0, "wpn_pistol").setDepth(21).setScale(3).setOrigin(0, 0.5).setVisible(false);
         entry = { body, weapon, charName, lastDir: "down", prevX: 0, prevY: 0 };
         playerSprites.set(p.id, entry);
       }
@@ -6215,7 +6282,7 @@ void main() {
       if (!entry) {
         const charName = CHAR_NAMES[hashStr(b.id) % CHAR_NAMES.length];
         const body = scene.add.sprite(b.x, b.y, `${charName}_idle`, 0).setDepth(15).setScale(CHAR_SCALE).setOrigin(0.5, 1);
-        const weapon = scene.add.sprite(b.x, b.y, "wpn_pistol").setDepth(16).setScale(2.5).setOrigin(0, 0.5).setVisible(false);
+        const weapon = scene.add.sprite(b.x, b.y, "wpn_pistol").setDepth(16).setScale(3).setOrigin(0, 0.5).setVisible(false);
         const hpBar = scene.add.graphics().setDepth(17);
         entry = { body, weapon, hpBar, charName, prevX: b.x, prevY: b.y };
         botSprites.set(b.id, entry);
@@ -6266,9 +6333,9 @@ void main() {
   }
   function getLootTexture(itemId) {
     if (itemId === "pistol") return "wpn_pistol";
-    if (itemId === "smg") return "wpn_smg";
-    if (itemId === "shotgun") return "wpn_shotgun";
-    if (itemId === "sniper") return "wpn_sniper";
+    if (itemId === "smg" || itemId === "ar") return "wpn_smg";
+    if (itemId === "shotgun" || itemId === "lmg") return "wpn_shotgun";
+    if (itemId === "sniper" || itemId === "dmr") return "wpn_sniper";
     if (itemId === "frag_grenade" || itemId === "smoke_grenade") return "loot_tactical";
     return "loot_consumable";
   }
@@ -6385,6 +6452,29 @@ void main() {
       padding: { x: 6, y: 4 }
     }).setScrollFactor(0).setDepth(D);
     minimapGfx = scene.add.graphics().setScrollFactor(0).setDepth(D);
+    ammoText = scene.add.text(sw - 120, sh - 14, "", {
+      fontSize: "13px",
+      fill: "#ffcc44",
+      fontFamily: "monospace",
+      fontStyle: "bold",
+      backgroundColor: "#00000088",
+      padding: { x: 6, y: 2 }
+    }).setScrollFactor(0).setDepth(D + 2).setOrigin(0.5, 1);
+    const rlX = sw - 160, rlY = sh - 70;
+    reloadBarBg = scene.add.rectangle(rlX + 60, rlY, 120, 8, 3355443, 0.8).setScrollFactor(0).setDepth(D).setVisible(false);
+    reloadBarFill = scene.add.rectangle(rlX, rlY, 0, 6, 4500223, 1).setScrollFactor(0).setDepth(D + 1).setOrigin(0, 0.5).setVisible(false);
+    armorText = scene.add.text(hpX + hpW + 10, hpY + 2, "", {
+      fontSize: "12px",
+      fill: "#88bbff",
+      fontFamily: "monospace"
+    }).setScrollFactor(0).setDepth(D + 1);
+    aliveCountText = scene.add.text(16, 36, "", {
+      fontSize: "11px",
+      fill: "#aaa",
+      fontFamily: "monospace",
+      backgroundColor: "#00000066",
+      padding: { x: 6, y: 2 }
+    }).setScrollFactor(0).setDepth(D);
     const audioBtn = scene.add.text(16, sh - 36, "SOUND: OFF", {
       fontSize: "12px",
       fill: "#888",
@@ -6408,25 +6498,68 @@ void main() {
     hpBarFill.displayWidth = hpW * hpPct;
     hpBarFill.fillColor = hpPct > 0.5 ? 3394645 : hpPct > 0.25 ? 16755200 : 16724787;
     hpText.setText(Math.round(me.hp));
-    const cons = me.inventory?.consumables || [];
-    const boostPct = cons.length / 4;
+    const boostPct = (me.boost || 0) / 100;
     boostBarFill.displayWidth = 276 * boostPct;
+    boostBarFill.fillColor = boostPct > 0.6 ? 16746496 : 16755200;
     const inv = me.inventory || {};
+    const WEAPON_DISPLAY = { pistol: "PISTOL", smg: "SMG", shotgun: "SHOTGUN", sniper: "SNIPER", ar: "AR", lmg: "LMG", dmr: "DMR" };
     const slotData = [inv.primary || "\u2014", inv.secondary || "\u2014", (inv.tactical || [])[0] || "\u2014"];
     const slotNames = ["primary", "secondary", "tactical"];
     for (let i = 0; i < 3; i++) {
       const item = slotData[i];
-      weaponSlots[i].icon.setText(item === "\u2014" ? "\u2014" : item.toUpperCase());
+      weaponSlots[i].icon.setText(item === "\u2014" ? "\u2014" : WEAPON_DISPLAY[item] || item.toUpperCase());
       const isActive = slotNames[i] === activeSlot;
       weaponSlots[i].bg.setStrokeStyle(isActive ? 2 : 1, isActive ? 4521830 : 4473958);
+    }
+    if (ammoText) {
+      const activeWeaponId = inv[activeSlot];
+      if (activeWeaponId && inv.magAmmo && activeSlot !== "tactical") {
+        const mag = inv.magAmmo[activeSlot] || 0;
+        const AMMO_TYPES = { pistol: "9mm", smg: "9mm", shotgun: "12gauge", sniper: "300", ar: "556", lmg: "762", dmr: "762" };
+        const ammoType = AMMO_TYPES[activeWeaponId] || "";
+        const reserve = inv.ammo && inv.ammo[ammoType] || 0;
+        ammoText.setText(`${mag} / ${reserve}`);
+        ammoText.setColor(mag === 0 ? "#ff3333" : "#ffcc44");
+      } else {
+        ammoText.setText("");
+      }
+    }
+    if (reloadBarBg && reloadBarFill) {
+      if (me.reloading) {
+        reloadBarBg.setVisible(true);
+        reloadBarFill.setVisible(true);
+        const RELOAD_TIMES = { pistol: 1500, smg: 2e3, shotgun: 2500, sniper: 3e3, ar: 2200, lmg: 5e3, dmr: 2500 };
+        const activeWeaponId = inv[activeSlot];
+        const reloadMs = activeWeaponId && RELOAD_TIMES[activeWeaponId] || 2e3;
+        const reloadTicks = Math.ceil(reloadMs / 1e3 * 60);
+        const ticksLeft = Math.max(0, (me.reloadEndTick || 0) - (serverTick || 0));
+        const progress = Math.max(0, Math.min(1, 1 - ticksLeft / reloadTicks));
+        reloadBarFill.displayWidth = 120 * progress;
+      } else {
+        reloadBarBg.setVisible(false);
+        reloadBarFill.setVisible(false);
+      }
+    }
+    if (armorText) {
+      const vl = me.vestLevel || 0;
+      const hl = me.helmetLevel || 0;
+      let armorStr = "";
+      if (vl > 0) armorStr += `V${vl} `;
+      if (hl > 0) armorStr += `H${hl}`;
+      armorText.setText(armorStr);
     }
     if (serverZone) {
       const z = serverZone;
       zoneTimerText.setText(`ZONE ${z.phase} \u2014 ${Math.ceil(z.timeLeft)}s`);
       zoneTimerText.setX(sw / 2);
     }
-    const alive = serverPlayers.filter((p) => p.alive).length;
-    playerCountText.setText(`${alive} alive | ${serverBots.length} bots`);
+    const alivePlayers = serverPlayers.filter((p) => p.alive).length;
+    const aliveBots = serverBots.length;
+    const totalAlive = alivePlayers + aliveBots;
+    playerCountText.setText(`${totalAlive} alive`);
+    if (aliveCountText) {
+      aliveCountText.setText(`Players: ${alivePlayers} | Bots: ${aliveBots}`);
+    }
     const now = Date.now();
     for (let i = killFeed.length - 1; i >= 0; i--) {
       if (now - killFeed[i].time > 5e3) {
@@ -6707,6 +6840,8 @@ void main() {
     width: window.innerWidth,
     height: window.innerHeight,
     backgroundColor: "#000000",
+    pixelArt: true,
+    // nearest-neighbor scaling for all sprites
     disableVisibilityChange: true,
     scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
     physics: { default: "arcade", arcade: { gravity: { y: 0 }, debug: false } },
