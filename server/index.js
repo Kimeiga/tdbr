@@ -42,7 +42,8 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e7, // 10MB for map data
 });
 
-let game = new GameServer(io);
+const GAME_MODE = process.env.GAME_MODE || 'arena'; // 'normal' or 'arena'
+let game = new GameServer(io, GAME_MODE);
 
 io.on('connection', socket => {
   console.log(`Player connected: ${socket.id}`);
@@ -76,7 +77,7 @@ io.on('connection', socket => {
   socket.on('restart_server', () => {
     console.log('Server restart requested — regenerating map...');
     game.stop();
-    game = new GameServer(io);
+    game = new GameServer(io, GAME_MODE);
     game.start();
     // Reconnect all existing sockets
     for (const [, s] of io.sockets.sockets) {

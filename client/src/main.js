@@ -4,11 +4,11 @@ import { FOV } from 'rot-js';
 
 const TILE_PX = 48;
 const CHAR_SCALE = 3;  // 16x32 sprites rendered at 3x = 48x96 pixels (matching 48px tiles)
-const INTERP_SPEED = 0.2;
+const INTERP_SPEED = 10; // lerp speed per second (used as 1-e^(-speed*dt))
 
 // ─── Character names for random assignment ────────────────────────
 const CHAR_NAMES = ['Adam', 'Alex', 'Amelia', 'Bob'];
-const DIR_OFFSETS = { down: 0, up: 6, right: 12, left: 18 };
+const DIR_OFFSETS = { right: 0, up: 6, left: 12, down: 18 };
 
 function hashStr(s) {
   s = String(s);
@@ -53,6 +53,7 @@ let mapGrid2D = null;
 
 // ─── Wall autotile variants ───────────────────────────────────────
 let wallVariants = null;
+let gameMode = 'normal'; // 'normal' or 'arena'
 
 // ─── Loot ──────────────────────────────────────────────────────────
 let groundLoot = [];
@@ -399,6 +400,29 @@ function update(time, delta) {
   if (!connected || !myId) return;
   const dt = delta / 1000;
 
+  // ── Arena spectator mode — skip all player input ─────────
+  if (gameMode === 'arena') {
+    recomputeFOV();
+    combatGfx.clear();
+    updateSmokeClouds(dt);
+    updateFogOfWar(this);
+    updateBotSprites(this);
+    updateLootSprites(this);
+    updateHUD_frame(this);
+
+    // Camera centered on arena
+    const arenaCenterX = (mapSize / 2) * TILE_PX;
+    const arenaCenterY = (mapSize / 2) * TILE_PX;
+    cameraX += (arenaCenterX - cameraX) * CAMERA_SMOOTHING;
+    cameraY += (arenaCenterY - cameraY) * CAMERA_SMOOTHING;
+    this.cameras.main.centerOn(cameraX, cameraY);
+    if (!this._arenaZoomSet) {
+      this.cameras.main.setZoom(1.5);
+      this._arenaZoomSet = true;
+    }
+    return;
+  }
+
   // ── Input ────────────────────────────────────────────────
   const keys = this.input.keyboard.addKeys({
     w: Phaser.Input.Keyboard.KeyCodes.W,
@@ -542,6 +566,7 @@ function connectToServer(scene) {
     serverBots = data.bots;
     serverZone = data.zone;
     wallVariants = data.wallVariants || null;
+    gameMode = data.mode || 'normal';
 
     mapGrid2D = [];
     for (let r = 0; r < mapSize; r++) {
@@ -961,11 +986,15 @@ function processEvents(scene) {
     switch (ev.type) {
       case 'fire': {
         // Tracer line from shooter — raycast to find wall hit on client
-        const shooter = serverPlayers.find(p => p.id === ev.shooterId);
-        const baseX = shooter ? shooter.x : predictedX;
-        const baseY = shooter ? shooter.y : predictedY;
-        const originX = baseX;
-        const originY = baseY - 16; // center-mass
+        const shooter = serverPlayers.find(p => p.id === ev.shooterId)
+          || serverBots.find(b => b.id === ev.shooterId);
+        if (!shooter) break;
+        // Use interpolated sprite position if available for smooth visuals
+        const botEntry = botSprites.get(ev.shooterId);
+        const playerEntry = playerSprites.get(ev.shooterId);
+        const spriteEntry = botEntry || playerEntry;
+        const originX = spriteEntry ? spriteEntry.body.x : shooter.x;
+        const originY = (spriteEntry ? spriteEntry.body.y : shooter.y) - 20; // weapon height
         // Raycast to find where tracer hits a wall
         let tracerEndX = originX + Math.cos(ev.angle) * 500;
         let tracerEndY = originY + Math.sin(ev.angle) * 500;
@@ -999,6 +1028,40 @@ function processEvents(scene) {
 
       case 'hit': {
         playHitMarker();
+        // Visual hit effect — flash the character red
+        if (ev.targetType === 'bot') {
+          const entry = botSprites.get(ev.targetId);
+          if (entry) {
+            entry.body.setTint(0xff0000);
+            scene.time.delayedCall(120, () => entry.body.clearTint());
+          }
+        } else if (ev.targetType === 'player') {
+          const entry = playerSprites.get(ev.targetId);
+          if (entry) {
+            entry.body.setTint(0xff0000);
+            scene.time.delayedCall(120, () => entry.body.clearTint());
+          }
+        }
+        // Blood/hit particles at impact location
+        if (ev.x !== undefined && ev.y !== undefined) {
+          for (let i = 0; i < 3; i++) {
+            const particle = scene.add.circle(
+              ev.x + (Math.random() - 0.5) * 12,
+              ev.y + (Math.random() - 0.5) * 12,
+              2 + Math.random() * 3,
+              0xff2222, 0.8
+            ).setDepth(47);
+            scene.tweens.add({
+              targets: particle,
+              alpha: 0,
+              scale: 0.3,
+              x: particle.x + (Math.random() - 0.5) * 16,
+              y: particle.y + (Math.random() - 0.5) * 16,
+              duration: 200 + Math.random() * 100,
+              onComplete: () => particle.destroy(),
+            });
+          }
+        }
         break;
       }
 
@@ -1085,6 +1148,31 @@ function processEvents(scene) {
         }
         break;
       }
+
+      case 'round_end': {
+        // Show round end banner
+        const sw = scene.scale.width, sh = scene.scale.height;
+        const banner = scene.add.rectangle(sw / 2, sh / 2 - 40, 300, 80, 0x0a0a1a, 0.9)
+          .setScrollFactor(0).setDepth(300).setStrokeStyle(2, 0xffaa00);
+        const winText = scene.add.text(sw / 2, sh / 2 - 55, `WINNER: ${ev.winner}`, {
+          fontSize: '18px', fill: '#ffdd44', fontFamily: 'monospace', fontStyle: 'bold',
+        }).setScrollFactor(0).setDepth(301).setOrigin(0.5);
+        const hpText = scene.add.text(sw / 2, sh / 2 - 30, `HP: ${ev.winnerHp}`, {
+          fontSize: '14px', fill: '#44ff66', fontFamily: 'monospace',
+        }).setScrollFactor(0).setDepth(301).setOrigin(0.5);
+        const restartText = scene.add.text(sw / 2, sh / 2 - 10, `Restarting in ${ev.seconds}s...`, {
+          fontSize: '12px', fill: '#aaaaaa', fontFamily: 'monospace',
+        }).setScrollFactor(0).setDepth(301).setOrigin(0.5);
+
+        // Auto-remove after delay
+        scene.time.delayedCall((ev.seconds || 3) * 1000, () => {
+          banner.destroy();
+          winText.destroy();
+          hpText.destroy();
+          restartText.destroy();
+        });
+        break;
+      }
     }
   }
 }
@@ -1163,8 +1251,10 @@ function updatePlayerSprites(scene) {
         continue;
       }
       entry.body.setVisible(true);
-      sx = entry.body.x + (p.x - entry.body.x) * INTERP_SPEED;
-      sy = entry.body.y + (p.y - entry.body.y) * INTERP_SPEED;
+      const dt = 1 / 60;
+      const t = 1 - Math.exp(-INTERP_SPEED * dt);
+      sx = entry.body.x + (p.x - entry.body.x) * t;
+      sy = entry.body.y + (p.y - entry.body.y) * t;
     }
 
     // For local player, use current mouse angle (no server delay)
@@ -1178,10 +1268,19 @@ function updatePlayerSprites(scene) {
       }
     }
 
-    const dir = angleToDirection(aimAngle);
     const dx = sx - entry.prevX, dy = sy - entry.prevY;
     const isMoving = (dx * dx + dy * dy) > 0.5;
     entry.prevX = sx; entry.prevY = sy;
+
+    // Face movement direction when walking, fall back to aim direction when idle
+    let dir;
+    if (isMoving) {
+      const moveAngle = Math.atan2(dy, dx);
+      dir = angleToDirection(moveAngle);
+      entry.lastMoveDir = dir;
+    } else {
+      dir = entry.lastMoveDir || angleToDirection(aimAngle);
+    }
 
     const animKey = `${entry.charName}_${isMoving ? 'run' : 'idle'}_${dir}`;
     entry.body.anims.play(animKey, true);
@@ -1237,14 +1336,40 @@ function updateBotSprites(scene) {
     entry.weapon.setVisible(false);
     entry.hpBar.setVisible(visible && b.hp < 100);
 
-    if (visible) {
-      const sx = entry.body.x + (b.x - entry.body.x) * INTERP_SPEED;
-      const sy = entry.body.y + (b.y - entry.body.y) * INTERP_SPEED;
+    // Store server target for smooth interpolation
+    if (!entry.targetX) { entry.targetX = b.x; entry.targetY = b.y; }
+    // Track if server position actually changed (bot is moving server-side)
+    const serverMoved = Math.abs(b.x - entry.targetX) > 0.5 || Math.abs(b.y - entry.targetY) > 0.5;
+    entry.targetX = b.x;
+    entry.targetY = b.y;
+    if (serverMoved) entry.lastServerMoveTime = Date.now();
 
-      const dir = angleToDirection(b.angle);
-      const dx = sx - entry.prevX, dy = sy - entry.prevY;
-      const isMoving = (dx * dx + dy * dy) > 0.5;
-      entry.prevX = sx; entry.prevY = sy;
+    if (visible) {
+      // Delta-time-based exponential smoothing
+      const dt = 1 / 60; // approximate frame dt
+      const t = 1 - Math.exp(-INTERP_SPEED * dt);
+      const sx = entry.body.x + (b.x - entry.body.x) * t;
+      const sy = entry.body.y + (b.y - entry.body.y) * t;
+
+      // Use server movement state, not interpolation deltas, to determine if moving
+      // This prevents animation flickering from lerp settling
+      const timeSinceMove = Date.now() - (entry.lastServerMoveTime || 0);
+      const isMoving = timeSinceMove < 200; // consider moving for 200ms after last server move
+
+      // Direction from actual server-side movement (larger delta = more stable direction)
+      let dir;
+      if (isMoving && serverMoved) {
+        const moveDx = b.x - (entry.prevServerX || b.x);
+        const moveDy = b.y - (entry.prevServerY || b.y);
+        if (moveDx * moveDx + moveDy * moveDy > 1) {
+          const moveAngle = Math.atan2(moveDy, moveDx);
+          dir = angleToDirection(moveAngle);
+          entry.lastMoveDir = dir;
+        }
+      }
+      if (!dir) dir = entry.lastMoveDir || angleToDirection(b.angle);
+
+      if (serverMoved) { entry.prevServerX = entry.targetX; entry.prevServerY = entry.targetY; }
 
       const animKey = `${entry.charName}_${isMoving ? 'run' : 'idle'}_${dir}`;
       entry.body.anims.play(animKey, true);
@@ -1780,73 +1905,6 @@ window.__game = {
   },
   pickup() { const n = findNearestLoot(); if (n) { channel.emit('pickup', { lootId: n.id }); return true; } return false; },
   _autoInterval: null,
-  autoPlay(enabled) {
-    if (!enabled) { if (this._autoInterval) clearInterval(this._autoInterval); this._autoInterval = null; return 'OFF'; }
-    this._autoInterval = setInterval(() => {
-      if (!connected) return;
-      const s = this.state();
-      if (!s.player) return;
-      if (!s.player.alive) {
-        // Auto-respawn
-        channel.emit('input', { seq: ++inputSeq, keys: {w:false,a:false,s:false,d:false}, angle: 0 });
-        return;
-      }
-
-      // 1. Zone check — if outside zone, prioritize getting inside
-      if (s.zone) {
-        const dx = s.player.x - s.zone.current.x;
-        const dy = s.player.y - s.zone.current.y;
-        const distToCenter = Math.sqrt(dx*dx + dy*dy);
-        if (distToCenter > s.zone.current.radius * 0.9) {
-          // Outside or near edge of zone — move toward center
-          this.moveTo(s.zone.current.x, s.zone.current.y);
-          return;
-        }
-      }
-
-      // 2. Health management — use consumables when hurt
-      if (s.player.hp < 60 && s.player.inventory.consumables.length > 0) {
-        channel.emit('use_item', { slot: 'consumable', index: 0 });
-      }
-
-      // 3. Tactical retreat — if low HP, flee from enemies
-      if (s.player.hp < 30) {
-        const retreated = this.dodge();
-        if (retreated) return;
-      }
-
-      // 4. Pickup nearby loot (always try)
-      this.pickup();
-
-      // 5. Target assessment — prefer low HP bots (easier kills)
-      let target = null;
-      let bestScore = Infinity;
-      for (const b of s.nearbyBots) {
-        if (b.dist > 500) continue;
-        // Only target bots with clear line of fire
-        if (!hasDirectLOS(predictedX, predictedY, b.x, b.y)) continue;
-        // Score: lower is better. Prefer close + low HP targets
-        const score = b.dist * (b.hp / 100);
-        if (score < bestScore) { bestScore = score; target = b; }
-      }
-
-      // 6. Combat — shoot best target
-      if (target && target.dist < 400) {
-        this.shoot(target.x, target.y);
-        // Strafe while shooting (don't stand still)
-        if (target.dist < 200) {
-          this.dodge();
-        }
-      }
-
-      // 7. If nothing else, move toward zone center or patrol
-      if (!target && s.zone) {
-        this.moveTo(s.zone.current.x, s.zone.current.y);
-      }
-
-    }, 50); // 50ms update rate (was 100ms)
-    return 'ON';
-  },
 };
 
 // ═══════════════════════════════════════════════════════════════════

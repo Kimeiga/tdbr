@@ -1,6 +1,6 @@
 // GameServer.js — authoritative game loop coordinating all subsystems
 
-import { generateMap, isWalkable, MAP_SIZE, TILE_PX } from './MapGenerator.js';
+import { generateMap, generateArenaMap, isWalkable, MAP_SIZE, TILE_PX } from './MapGenerator.js';
 import { Bot } from './Bot.js';
 import { WEAPON_DEFS, fireHitscan, fireProjectile, updateProjectiles } from './WeaponSystem.js';
 import { spawnLoot, pickupLoot, createInventory, addToInventory, ITEM_DEFS, setWeaponDefs } from './LootManager.js';
@@ -22,29 +22,41 @@ function activeSlotForPlayer(p) {
 }
 
 export class GameServer {
-  constructor(io) {
+  constructor(io, mode = 'normal') {
     this.io = io;
+    this.mode = mode; // 'normal' or 'arena'
 
     // Register weapon defs for LootManager ammo loading
     setWeaponDefs(WEAPON_DEFS);
 
     // Generate map
-    const { grid: flatGrid, walkable, wallVariants } = generateMap();
-    this.flatGrid = flatGrid;
-    this.walkable = walkable;
-    this.wallVariants = wallVariants;
+    if (mode === 'arena') {
+      const result = generateArenaMap();
+      this.flatGrid = result.grid;
+      this.walkable = result.walkable;
+      this.wallVariants = result.wallVariants;
+      this.mapSizeActual = result.mapSize;
+    } else {
+      const { grid: flatGrid, walkable, wallVariants } = generateMap();
+      this.flatGrid = flatGrid;
+      this.walkable = walkable;
+      this.wallVariants = wallVariants;
+      this.mapSizeActual = MAP_SIZE;
+    }
+
+    const sz = this.mapSizeActual;
 
     // 2D grid for subsystems
     this.mapGrid = [];
-    for (let r = 0; r < MAP_SIZE; r++) {
-      this.mapGrid[r] = new Array(MAP_SIZE);
-      for (let c = 0; c < MAP_SIZE; c++) {
-        this.mapGrid[r][c] = flatGrid[r * MAP_SIZE + c];
+    for (let r = 0; r < sz; r++) {
+      this.mapGrid[r] = new Array(sz);
+      for (let c = 0; c < sz; c++) {
+        this.mapGrid[r][c] = this.flatGrid[r * sz + c];
       }
     }
 
     this.isWalkableFn = (tx, ty) => {
-      if (tx < 0 || ty < 0 || tx >= MAP_SIZE || ty >= MAP_SIZE) return false;
+      if (tx < 0 || ty < 0 || tx >= sz || ty >= sz) return false;
       return isWalkable(this.mapGrid[ty][tx]);
     };
 
@@ -53,16 +65,24 @@ export class GameServer {
 
     // Bots
     this.bots = [];
-    this._spawnBots();
+    if (mode === 'arena') {
+      this._spawnArenaBots();
+    } else {
+      this._spawnBots();
+    }
 
     // Loot
-    this.loot = spawnLoot(this.mapGrid, MAP_SIZE);
+    if (mode === 'arena') {
+      this.loot = this._spawnArenaLoot();
+    } else {
+      this.loot = spawnLoot(this.mapGrid, sz);
+    }
 
     // Zone
-    this.zone = new ZoneManager(MAP_SIZE, TILE_PX);
+    this.zone = new ZoneManager(sz, TILE_PX);
 
     // Pathfinder (A* on the tile grid)
-    this.pathfinder = createPathfinder(this.mapGrid, MAP_SIZE);
+    this.pathfinder = createPathfinder(this.mapGrid, sz);
 
     // Projectiles
     this.projectiles = [];
@@ -109,6 +129,69 @@ export class GameServer {
     console.log(`Spawned ${this.bots.length} bots (target: ${BOT_COUNT}, min spacing: ${MIN_SPAWN_DIST}px)`);
   }
 
+  _spawnArenaBots() {
+    const half = TILE_PX / 2;
+    // Spawn 4 bots in the corners of the arena
+    const spawns = [
+      { x: 4, y: 5 },   // top-left
+      { x: 15, y: 5 },  // top-right
+      { x: 4, y: 15 },  // bottom-left
+      { x: 15, y: 15 }, // bottom-right
+    ];
+    for (const s of spawns) {
+      this.bots.push(new Bot(s.x * TILE_PX + half, s.y * TILE_PX + half));
+    }
+    console.log(`Arena mode: spawned ${this.bots.length} bots`);
+  }
+
+  _spawnArenaLoot() {
+    const loot = [];
+    let nextId = 1;
+    const half = TILE_PX / 2;
+
+    // Collect walkable tiles (excluding border)
+    const spots = [];
+    for (const w of this.walkable) {
+      // Skip tiles near the border or on cover walls
+      if (w.x >= 3 && w.x <= 16 && w.y >= 4 && w.y <= 16) {
+        spots.push(w);
+      }
+    }
+    // Shuffle
+    for (let i = spots.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [spots[i], spots[j]] = [spots[j], spots[i]];
+    }
+
+    let si = 0;
+    function nextSpot() {
+      const s = spots[si++ % spots.length];
+      return { x: s.x * TILE_PX + half, y: s.y * TILE_PX + half };
+    }
+
+    // 4 weapons (one per bot roughly)
+    const weapons = ['ar', 'smg', 'shotgun', 'pistol'];
+    for (const w of weapons) {
+      const p = nextSpot();
+      loot.push({ id: `arena_${nextId++}`, itemId: w, x: p.x, y: p.y, pickedUp: false });
+    }
+
+    // Ammo for each weapon type
+    const ammoTypes = ['ammo_556', 'ammo_9mm', 'ammo_12gauge', 'ammo_9mm', 'ammo_556'];
+    for (const a of ammoTypes) {
+      const p = nextSpot();
+      loot.push({ id: `arena_${nextId++}`, itemId: a, x: p.x, y: p.y, pickedUp: false });
+    }
+
+    // A couple medkits
+    for (let i = 0; i < 2; i++) {
+      const p = nextSpot();
+      loot.push({ id: `arena_${nextId++}`, itemId: 'medkit', x: p.x, y: p.y, pickedUp: false });
+    }
+
+    return loot;
+  }
+
   getSpawnPos() {
     // Try to find a spawn position away from bots and other players
     const MIN_SAFE_DIST = 200;
@@ -141,6 +224,32 @@ export class GameServer {
   }
 
   addPlayer(socket) {
+    if (this.mode === 'arena') {
+      // Arena mode: player is a spectator, no playable character
+      const sz = this.mapSizeActual;
+      const spectatorState = {
+        id: socket.id, x: sz * TILE_PX / 2, y: sz * TILE_PX / 2,
+        angle: 0, hp: 100, alive: true, lastSeq: 0,
+        reloading: false, sprinting: false, crouching: false, boost: 0,
+        vestLevel: 0, helmetLevel: 0,
+        inventory: { primary: null, secondary: null, tactical: [], consumables: [], ammo: {}, magAmmo: {} },
+      };
+      // Don't add to this.players — spectator only
+      socket.emit('init', {
+        playerId: socket.id,
+        map: Array.from(this.flatGrid),
+        mapSize: this.mapSizeActual,
+        tilePx: TILE_PX,
+        playerState: spectatorState,
+        bots: this.bots.map(b => b.serialize()),
+        loot: this.loot.filter(l => !l.pickedUp),
+        zone: this.zone.serialize(),
+        wallVariants: Array.from(this.wallVariants),
+        mode: this.mode,
+      });
+      return;
+    }
+
     const pos = this.getSpawnPos();
     const p = {
       id: socket.id,
@@ -173,13 +282,14 @@ export class GameServer {
     socket.emit('init', {
       playerId: socket.id,
       map: Array.from(this.flatGrid),
-      mapSize: MAP_SIZE,
+      mapSize: this.mapSizeActual,
       tilePx: TILE_PX,
       playerState: this._serializePlayer(p),
       bots: this.bots.map(b => b.serialize()),
       loot: this.loot.filter(l => !l.pickedUp),
       zone: this.zone.serialize(),
       wallVariants: Array.from(this.wallVariants),
+      mode: this.mode,
     });
   }
 
@@ -815,6 +925,25 @@ export class GameServer {
       }
     }
 
+    // Arena mode: restart when a bot dies
+    if (this.mode === 'arena') {
+      const aliveBots = this.bots.filter(b => b.hp > 0);
+      if (aliveBots.length <= 1 && !this._restartCountdown) {
+        const winner = aliveBots[0];
+        this._restartCountdown = this.tick + TICK_RATE * 3; // 3 seconds
+        this.events.push({
+          type: 'round_end',
+          winner: winner ? `Bot ${winner.id}` : 'Draw',
+          winnerHp: winner ? winner.hp : 0,
+          seconds: 3,
+        });
+      }
+      if (this._restartCountdown && this.tick >= this._restartCountdown) {
+        this._restartCountdown = null;
+        this._resetGame();
+      }
+    }
+
     // Auto-restart: when all human players are dead, countdown then reset
     if (this.players.size > 0) {
       const anyAlive = [...this.players.values()].some(p => p.alive);
@@ -842,32 +971,52 @@ export class GameServer {
   }
 
   _resetGame() {
-    console.log('Auto-restart: regenerating map...');
-    // Regenerate map
-    const { grid: flatGrid, walkable, wallVariants } = generateMap();
-    this.flatGrid = flatGrid;
-    this.walkable = walkable;
-    this.wallVariants = wallVariants;
+    console.log('Auto-restart: regenerating...');
+    const sz = this.mapSizeActual;
+
+    // Regenerate map (same mode)
+    if (this.mode === 'arena') {
+      const result = generateArenaMap();
+      this.flatGrid = result.grid;
+      this.walkable = result.walkable;
+      this.wallVariants = result.wallVariants;
+      this.mapSizeActual = result.mapSize;
+    } else {
+      const { grid: flatGrid, walkable, wallVariants } = generateMap();
+      this.flatGrid = flatGrid;
+      this.walkable = walkable;
+      this.wallVariants = wallVariants;
+    }
+
+    const newSz = this.mapSizeActual;
     this.mapGrid = [];
-    for (let r = 0; r < MAP_SIZE; r++) {
-      this.mapGrid[r] = new Array(MAP_SIZE);
-      for (let c = 0; c < MAP_SIZE; c++) {
-        this.mapGrid[r][c] = flatGrid[r * MAP_SIZE + c];
+    for (let r = 0; r < newSz; r++) {
+      this.mapGrid[r] = new Array(newSz);
+      for (let c = 0; c < newSz; c++) {
+        this.mapGrid[r][c] = this.flatGrid[r * newSz + c];
       }
     }
 
     // Reset bots
     this.bots = [];
-    this._spawnBots();
+    if (this.mode === 'arena') {
+      this._spawnArenaBots();
+    } else {
+      this._spawnBots();
+    }
 
     // Reset loot
-    this.loot = spawnLoot(this.mapGrid, MAP_SIZE);
+    if (this.mode === 'arena') {
+      this.loot = this._spawnArenaLoot();
+    } else {
+      this.loot = spawnLoot(this.mapGrid, newSz);
+    }
 
     // Reset zone
-    this.zone = new ZoneManager(MAP_SIZE, TILE_PX);
+    this.zone = new ZoneManager(newSz, TILE_PX);
 
     // Reset pathfinder
-    this.pathfinder = createPathfinder(this.mapGrid, MAP_SIZE);
+    this.pathfinder = createPathfinder(this.mapGrid, newSz);
 
     // Reset projectiles and state
     this.projectiles = [];
@@ -875,39 +1024,64 @@ export class GameServer {
     this.events = [];
     this.killCounts = new Map();
 
-    // Respawn all connected players
+    // Respawn/re-init all connected sockets
     for (const [, socket] of this.io.sockets.sockets) {
-      const p = this.players.get(socket.id);
-      if (p) {
-        const pos = this.getSpawnPos();
-        p.x = pos.x; p.y = pos.y;
-        p.hp = p.maxHp; p.alive = true;
-        p.spawnProtection = 180;
-        p.inputs = [];
-        p.reloading = false;
-        p.boost = 0;
-        p.inventory = createInventory();
-        addToInventory(p.inventory, ITEM_DEFS.pistol);
-        p.inventory.ammo['9mm'] = 60;
-        p.inventory.magAmmo.primary = WEAPON_DEFS.pistol.magSize;
+      if (this.mode === 'arena') {
+        // Re-send spectator init
+        const sz = this.mapSizeActual;
+        const spectatorState = {
+          id: socket.id, x: sz * TILE_PX / 2, y: sz * TILE_PX / 2,
+          angle: 0, hp: 100, alive: true, lastSeq: 0,
+          reloading: false, sprinting: false, crouching: false, boost: 0,
+          vestLevel: 0, helmetLevel: 0,
+          inventory: { primary: null, secondary: null, tactical: [], consumables: [], ammo: {}, magAmmo: {} },
+        };
+        socket.emit('init', {
+          playerId: socket.id,
+          map: Array.from(this.flatGrid),
+          mapSize: this.mapSizeActual,
+          tilePx: TILE_PX,
+          playerState: spectatorState,
+          bots: this.bots.map(b => b.serialize()),
+          loot: this.loot.filter(l => !l.pickedUp),
+          zone: this.zone.serialize(),
+          wallVariants: Array.from(this.wallVariants),
+          mode: this.mode,
+        });
+      } else {
+        const p = this.players.get(socket.id);
+        if (p) {
+          const pos = this.getSpawnPos();
+          p.x = pos.x; p.y = pos.y;
+          p.hp = p.maxHp; p.alive = true;
+          p.spawnProtection = 180;
+          p.inputs = [];
+          p.reloading = false;
+          p.boost = 0;
+          p.inventory = createInventory();
+          addToInventory(p.inventory, ITEM_DEFS.pistol);
+          p.inventory.ammo['9mm'] = 60;
+          p.inventory.magAmmo.primary = WEAPON_DEFS.pistol.magSize;
+        }
+        socket.emit('init', {
+          playerId: socket.id,
+          map: Array.from(this.flatGrid),
+          mapSize: this.mapSizeActual,
+          tilePx: TILE_PX,
+          playerState: this._serializePlayer(this.players.get(socket.id)),
+          bots: this.bots.map(b => b.serialize()),
+          loot: this.loot.filter(l => !l.pickedUp),
+          zone: this.zone.serialize(),
+          wallVariants: Array.from(this.wallVariants),
+          mode: this.mode,
+        });
       }
-      socket.emit('init', {
-        playerId: socket.id,
-        map: Array.from(this.flatGrid),
-        mapSize: MAP_SIZE,
-        tilePx: TILE_PX,
-        playerState: this._serializePlayer(this.players.get(socket.id)),
-        bots: this.bots.map(b => b.serialize()),
-        loot: this.loot.filter(l => !l.pickedUp),
-        zone: this.zone.serialize(),
-        wallVariants: Array.from(this.wallVariants),
-      });
     }
   }
 
   start() {
-    console.log(`Game loop starting at ${TICK_RATE} ticks/s`);
-    console.log(`Map: ${MAP_SIZE}x${MAP_SIZE}, Walkable tiles: ${this.walkable.length}, Bots: ${this.bots.length}, Loot: ${this.loot.length}`);
+    console.log(`Game loop starting at ${TICK_RATE} ticks/s (mode: ${this.mode})`);
+    console.log(`Map: ${this.mapSizeActual}x${this.mapSizeActual}, Walkable tiles: ${this.walkable.length}, Bots: ${this.bots.length}, Loot: ${this.loot.length}`);
     this._interval = setInterval(() => this.update(), TICK_MS);
   }
 

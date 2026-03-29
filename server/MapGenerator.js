@@ -449,6 +449,50 @@ function validateConnectivity(grid, walkable) {
 // Main generator
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Arena map generator — small square room for testing
+// ---------------------------------------------------------------------------
+
+export function generateArenaMap() {
+  const ARENA_SIZE = 20;
+  const grid = new Uint8Array(ARENA_SIZE * ARENA_SIZE);
+  // Fill with walls
+  // Uint8Array is zero-initialized = all walls
+
+  // Carve open floor in center (2-tile wall border, 2-tile tall walls)
+  for (let r = 3; r < ARENA_SIZE - 2; r++) {
+    for (let c = 2; c < ARENA_SIZE - 2; c++) {
+      grid[r * ARENA_SIZE + c] = TILE.SUBWAY_FLOOR;
+    }
+  }
+
+  // Add a few cover walls in the middle
+  // Small L-shaped cover on left side
+  grid[8 * ARENA_SIZE + 6] = TILE.WALL;
+  grid[9 * ARENA_SIZE + 6] = TILE.WALL;
+  grid[10 * ARENA_SIZE + 6] = TILE.WALL;
+  grid[10 * ARENA_SIZE + 7] = TILE.WALL;
+
+  // Small L-shaped cover on right side
+  grid[8 * ARENA_SIZE + 13] = TILE.WALL;
+  grid[9 * ARENA_SIZE + 13] = TILE.WALL;
+  grid[10 * ARENA_SIZE + 13] = TILE.WALL;
+  grid[10 * ARENA_SIZE + 12] = TILE.WALL;
+
+  // Build walkable list
+  const walkable = [];
+  for (let r = 0; r < ARENA_SIZE; r++) {
+    for (let c = 0; c < ARENA_SIZE; c++) {
+      if (isWalkable(grid[r * ARENA_SIZE + c])) {
+        walkable.push({ x: c, y: r });
+      }
+    }
+  }
+
+  const wallVariants = computeAutoTiles(grid, ARENA_SIZE);
+  return { grid, walkable, wallVariants, mapSize: ARENA_SIZE };
+}
+
 export function generateMap() {
   // Create grid filled with WALL
   const grid = new Uint8Array(MAP_SIZE * MAP_SIZE);

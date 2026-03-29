@@ -5223,9 +5223,9 @@ void main() {
   // client/src/main.js
   var TILE_PX = 48;
   var CHAR_SCALE = 3;
-  var INTERP_SPEED = 0.2;
+  var INTERP_SPEED = 10;
   var CHAR_NAMES = ["Adam", "Alex", "Amelia", "Bob"];
-  var DIR_OFFSETS = { down: 0, up: 6, right: 12, left: 18 };
+  var DIR_OFFSETS = { right: 0, up: 6, left: 12, down: 18 };
   function hashStr(s) {
     s = String(s);
     let h = 0;
@@ -5257,6 +5257,7 @@ void main() {
   var mapSize = 0;
   var mapGrid2D = null;
   var wallVariants = null;
+  var gameMode = "normal";
   var groundLoot = [];
   var inputSeq = 0;
   var pendingInputs = [];
@@ -5570,6 +5571,25 @@ void main() {
   function update(time, delta) {
     if (!connected || !myId) return;
     const dt = delta / 1e3;
+    if (gameMode === "arena") {
+      recomputeFOV();
+      combatGfx.clear();
+      updateSmokeClouds(dt);
+      updateFogOfWar(this);
+      updateBotSprites(this);
+      updateLootSprites(this);
+      updateHUD_frame(this);
+      const arenaCenterX = mapSize / 2 * TILE_PX;
+      const arenaCenterY = mapSize / 2 * TILE_PX;
+      cameraX += (arenaCenterX - cameraX) * CAMERA_SMOOTHING;
+      cameraY += (arenaCenterY - cameraY) * CAMERA_SMOOTHING;
+      this.cameras.main.centerOn(cameraX, cameraY);
+      if (!this._arenaZoomSet) {
+        this.cameras.main.setZoom(1.5);
+        this._arenaZoomSet = true;
+      }
+      return;
+    }
     const keys = this.input.keyboard.addKeys({
       w: Phaser.Input.Keyboard.KeyCodes.W,
       a: Phaser.Input.Keyboard.KeyCodes.A,
@@ -5694,6 +5714,7 @@ void main() {
       serverBots = data.bots;
       serverZone = data.zone;
       wallVariants = data.wallVariants || null;
+      gameMode = data.mode || "normal";
       mapGrid2D = [];
       for (let r = 0; r < mapSize; r++) {
         mapGrid2D[r] = [];
@@ -6083,11 +6104,13 @@ void main() {
     for (const ev of serverEvents) {
       switch (ev.type) {
         case "fire": {
-          const shooter = serverPlayers.find((p) => p.id === ev.shooterId);
-          const baseX = shooter ? shooter.x : predictedX;
-          const baseY = shooter ? shooter.y : predictedY;
-          const originX = baseX;
-          const originY = baseY - 16;
+          const shooter = serverPlayers.find((p) => p.id === ev.shooterId) || serverBots.find((b) => b.id === ev.shooterId);
+          if (!shooter) break;
+          const botEntry = botSprites.get(ev.shooterId);
+          const playerEntry = playerSprites.get(ev.shooterId);
+          const spriteEntry = botEntry || playerEntry;
+          const originX = spriteEntry ? spriteEntry.body.x : shooter.x;
+          const originY = (spriteEntry ? spriteEntry.body.y : shooter.y) - 20;
           let tracerEndX = originX + Math.cos(ev.angle) * 500;
           let tracerEndY = originY + Math.sin(ev.angle) * 500;
           const raySteps = Math.ceil(500 / 8);
@@ -6121,6 +6144,39 @@ void main() {
         }
         case "hit": {
           playHitMarker();
+          if (ev.targetType === "bot") {
+            const entry = botSprites.get(ev.targetId);
+            if (entry) {
+              entry.body.setTint(16711680);
+              scene.time.delayedCall(120, () => entry.body.clearTint());
+            }
+          } else if (ev.targetType === "player") {
+            const entry = playerSprites.get(ev.targetId);
+            if (entry) {
+              entry.body.setTint(16711680);
+              scene.time.delayedCall(120, () => entry.body.clearTint());
+            }
+          }
+          if (ev.x !== void 0 && ev.y !== void 0) {
+            for (let i = 0; i < 3; i++) {
+              const particle = scene.add.circle(
+                ev.x + (Math.random() - 0.5) * 12,
+                ev.y + (Math.random() - 0.5) * 12,
+                2 + Math.random() * 3,
+                16720418,
+                0.8
+              ).setDepth(47);
+              scene.tweens.add({
+                targets: particle,
+                alpha: 0,
+                scale: 0.3,
+                x: particle.x + (Math.random() - 0.5) * 16,
+                y: particle.y + (Math.random() - 0.5) * 16,
+                duration: 200 + Math.random() * 100,
+                onComplete: () => particle.destroy()
+              });
+            }
+          }
           break;
         }
         case "wallhit": {
@@ -6212,6 +6268,33 @@ void main() {
           }
           break;
         }
+        case "round_end": {
+          const sw = scene.scale.width, sh = scene.scale.height;
+          const banner = scene.add.rectangle(sw / 2, sh / 2 - 40, 300, 80, 657946, 0.9).setScrollFactor(0).setDepth(300).setStrokeStyle(2, 16755200);
+          const winText = scene.add.text(sw / 2, sh / 2 - 55, `WINNER: ${ev.winner}`, {
+            fontSize: "18px",
+            fill: "#ffdd44",
+            fontFamily: "monospace",
+            fontStyle: "bold"
+          }).setScrollFactor(0).setDepth(301).setOrigin(0.5);
+          const hpText2 = scene.add.text(sw / 2, sh / 2 - 30, `HP: ${ev.winnerHp}`, {
+            fontSize: "14px",
+            fill: "#44ff66",
+            fontFamily: "monospace"
+          }).setScrollFactor(0).setDepth(301).setOrigin(0.5);
+          const restartText = scene.add.text(sw / 2, sh / 2 - 10, `Restarting in ${ev.seconds}s...`, {
+            fontSize: "12px",
+            fill: "#aaaaaa",
+            fontFamily: "monospace"
+          }).setScrollFactor(0).setDepth(301).setOrigin(0.5);
+          scene.time.delayedCall((ev.seconds || 3) * 1e3, () => {
+            banner.destroy();
+            winText.destroy();
+            hpText2.destroy();
+            restartText.destroy();
+          });
+          break;
+        }
       }
     }
   }
@@ -6263,8 +6346,10 @@ void main() {
           continue;
         }
         entry.body.setVisible(true);
-        sx = entry.body.x + (p.x - entry.body.x) * INTERP_SPEED;
-        sy = entry.body.y + (p.y - entry.body.y) * INTERP_SPEED;
+        const dt = 1 / 60;
+        const t = 1 - Math.exp(-INTERP_SPEED * dt);
+        sx = entry.body.x + (p.x - entry.body.x) * t;
+        sy = entry.body.y + (p.y - entry.body.y) * t;
       }
       let aimAngle = p.angle;
       if (isMe && activeScene) {
@@ -6274,11 +6359,18 @@ void main() {
           aimAngle = Math.atan2(wp.y - sy, wp.x - sx);
         }
       }
-      const dir = angleToDirection(aimAngle);
       const dx = sx - entry.prevX, dy = sy - entry.prevY;
       const isMoving = dx * dx + dy * dy > 0.5;
       entry.prevX = sx;
       entry.prevY = sy;
+      let dir;
+      if (isMoving) {
+        const moveAngle = Math.atan2(dy, dx);
+        dir = angleToDirection(moveAngle);
+        entry.lastMoveDir = dir;
+      } else {
+        dir = entry.lastMoveDir || angleToDirection(aimAngle);
+      }
       const animKey = `${entry.charName}_${isMoving ? "run" : "idle"}_${dir}`;
       entry.body.anims.play(animKey, true);
       entry.body.setPosition(sx, sy);
@@ -6322,14 +6414,36 @@ void main() {
       entry.body.setVisible(visible);
       entry.weapon.setVisible(false);
       entry.hpBar.setVisible(visible && b.hp < 100);
+      if (!entry.targetX) {
+        entry.targetX = b.x;
+        entry.targetY = b.y;
+      }
+      const serverMoved = Math.abs(b.x - entry.targetX) > 0.5 || Math.abs(b.y - entry.targetY) > 0.5;
+      entry.targetX = b.x;
+      entry.targetY = b.y;
+      if (serverMoved) entry.lastServerMoveTime = Date.now();
       if (visible) {
-        const sx = entry.body.x + (b.x - entry.body.x) * INTERP_SPEED;
-        const sy = entry.body.y + (b.y - entry.body.y) * INTERP_SPEED;
-        const dir = angleToDirection(b.angle);
-        const dx = sx - entry.prevX, dy = sy - entry.prevY;
-        const isMoving = dx * dx + dy * dy > 0.5;
-        entry.prevX = sx;
-        entry.prevY = sy;
+        const dt = 1 / 60;
+        const t = 1 - Math.exp(-INTERP_SPEED * dt);
+        const sx = entry.body.x + (b.x - entry.body.x) * t;
+        const sy = entry.body.y + (b.y - entry.body.y) * t;
+        const timeSinceMove = Date.now() - (entry.lastServerMoveTime || 0);
+        const isMoving = timeSinceMove < 200;
+        let dir;
+        if (isMoving && serverMoved) {
+          const moveDx = b.x - (entry.prevServerX || b.x);
+          const moveDy = b.y - (entry.prevServerY || b.y);
+          if (moveDx * moveDx + moveDy * moveDy > 1) {
+            const moveAngle = Math.atan2(moveDy, moveDx);
+            dir = angleToDirection(moveAngle);
+            entry.lastMoveDir = dir;
+          }
+        }
+        if (!dir) dir = entry.lastMoveDir || angleToDirection(b.angle);
+        if (serverMoved) {
+          entry.prevServerX = entry.targetX;
+          entry.prevServerY = entry.targetY;
+        }
         const animKey = `${entry.charName}_${isMoving ? "run" : "idle"}_${dir}`;
         entry.body.anims.play(animKey, true);
         entry.body.setPosition(sx, sy);
@@ -6810,61 +6924,7 @@ void main() {
       }
       return false;
     },
-    _autoInterval: null,
-    autoPlay(enabled) {
-      if (!enabled) {
-        if (this._autoInterval) clearInterval(this._autoInterval);
-        this._autoInterval = null;
-        return "OFF";
-      }
-      this._autoInterval = setInterval(() => {
-        if (!connected) return;
-        const s = this.state();
-        if (!s.player) return;
-        if (!s.player.alive) {
-          channel.emit("input", { seq: ++inputSeq, keys: { w: false, a: false, s: false, d: false }, angle: 0 });
-          return;
-        }
-        if (s.zone) {
-          const dx = s.player.x - s.zone.current.x;
-          const dy = s.player.y - s.zone.current.y;
-          const distToCenter = Math.sqrt(dx * dx + dy * dy);
-          if (distToCenter > s.zone.current.radius * 0.9) {
-            this.moveTo(s.zone.current.x, s.zone.current.y);
-            return;
-          }
-        }
-        if (s.player.hp < 60 && s.player.inventory.consumables.length > 0) {
-          channel.emit("use_item", { slot: "consumable", index: 0 });
-        }
-        if (s.player.hp < 30) {
-          const retreated = this.dodge();
-          if (retreated) return;
-        }
-        this.pickup();
-        let target = null;
-        let bestScore = Infinity;
-        for (const b of s.nearbyBots) {
-          if (b.dist > 500) continue;
-          if (!hasDirectLOS(predictedX, predictedY, b.x, b.y)) continue;
-          const score = b.dist * (b.hp / 100);
-          if (score < bestScore) {
-            bestScore = score;
-            target = b;
-          }
-        }
-        if (target && target.dist < 400) {
-          this.shoot(target.x, target.y);
-          if (target.dist < 200) {
-            this.dodge();
-          }
-        }
-        if (!target && s.zone) {
-          this.moveTo(s.zone.current.x, s.zone.current.y);
-        }
-      }, 50);
-      return "ON";
-    }
+    _autoInterval: null
   };
   var config = {
     type: Phaser.AUTO,

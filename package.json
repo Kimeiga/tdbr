@@ -5,7 +5,8 @@
   "scripts": {
     "build": "esbuild client/src/main.js --bundle --outfile=client/public/bundle.js --format=iife --platform=browser --external:phaser",
     "start": "node server/index.js",
-    "dev": "npm run build && npm start"
+    "dev": "npm run build && npm start",
+    "watch": "esbuild client/src/main.js --bundle --outfile=client/public/bundle.js --format=iife --platform=browser --external:phaser --watch=forever"
   },
   "dependencies": {
     "@geckos.io/client": "^3.0.2",

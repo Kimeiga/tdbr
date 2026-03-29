@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Character Animation Test</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #eee; font-family: monospace; display: flex; height: 100vh; }
+#preview { flex: 1; display: flex; align-items: center; justify-content: center; border-right: 2px solid #333; }
+#preview canvas { image-rendering: pixelated; }
+#controls { width: 360px; padding: 16px; overflow-y: auto; }
+h2 { color: #aaddff; margin-bottom: 12px; font-size: 14px; }
+h3 { color: #88aacc; margin: 12px 0 6px; font-size: 12px; border-bottom: 1px solid #333; padding-bottom: 4px; }
+.btn-group { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+button { background: #2a2a4a; color: #ccc; border: 1px solid #444; padding: 6px 12px; cursor: pointer; font-family: monospace; font-size: 11px; border-radius: 3px; }
+button:hover { background: #3a3a5a; }
+button.active { background: #4466aa; color: #fff; border-color: #6688cc; }
+.info { color: #888; font-size: 11px; margin-top: 8px; }
+.frame-info { color: #ffdd44; font-size: 13px; margin: 12px 0; }
+.dir-label { display: inline-block; width: 50px; color: #aaa; }
+</style>
+</head>
+<body>
+
+<div id="preview">
+  <canvas id="canvas" width="256" height="256"></canvas>
+</div>
+
+<div id="controls">
+  <h2>Character Animation Tester</h2>
+
+  <h3>Character</h3>
+  <div class="btn-group" id="charBtns"></div>
+
+  <h3>Animation</h3>
+  <div class="btn-group" id="animBtns"></div>
+
+  <h3>Direction</h3>
+  <div class="btn-group" id="dirBtns"></div>
+
+  <div class="frame-info" id="frameInfo">-</div>
+
+  <h3>All Directions (click to select)</h3>
+  <div id="allDirs"></div>
+
+  <div class="info">
+    <p>Current mapping in code:</p>
+    <p>down: frames 0-5</p>
+    <p>up: frames 6-11</p>
+    <p>left: frames 12-17</p>
+    <p>right: frames 18-23</p>
+  </div>
+</div>
+
+<script>
+const CHARS = ['Adam', 'Alex', 'Amelia', 'Bob'];
+const ANIMS = ['run', 'idle'];
+const DIRS = ['down', 'up', 'left', 'right'];
+const DIR_OFFSETS = { right: 0, up: 6, left: 12, down: 18 };
+const FRAME_W = 16, FRAME_H = 32;
+const SCALE = 6;
+const FPS = 10;
+
+let currentChar = 'Adam';
+let currentAnim = 'run';
+let currentDir = 'down';
+let currentFrame = 0;
+let lastFrameTime = 0;
+
+const images = {};
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+// Load all spritesheets
+let loadCount = 0;
+const totalLoads = CHARS.length * ANIMS.length;
+for (const char of CHARS) {
+  for (const anim of ANIMS) {
+    const key = `${char}_${anim}`;
+    const img = new Image();
+    const filename = anim === 'run' ? `${char}_run_16x16.png` : `${char}_idle_anim_16x16.png`;
+    img.src = `assets/limzu/${filename}`;
+    img.onload = () => { loadCount++; if (loadCount === totalLoads) requestAnimationFrame(loop); };
+    images[key] = img;
+  }
+}
+
+function getFrameIndex() {
+  return DIR_OFFSETS[currentDir] + currentFrame;
+}
+
+function loop(time) {
+  requestAnimationFrame(loop);
+
+  if (time - lastFrameTime > 1000 / FPS) {
+    currentFrame = (currentFrame + 1) % 6;
+    lastFrameTime = time;
+  }
+
+  // Clear
+  ctx.fillStyle = '#2a2a3e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Draw grid
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= canvas.width; x += FRAME_W * SCALE) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+  }
+  for (let y = 0; y <= canvas.height; y += FRAME_H * SCALE) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+  }
+
+  const key = `${currentChar}_${currentAnim}`;
+  const img = images[key];
+  if (!img || !img.complete) return;
+
+  const frameIdx = getFrameIndex();
+  const srcX = frameIdx * FRAME_W;
+  const srcY = 0;
+
+  // Draw centered
+  const drawW = FRAME_W * SCALE;
+  const drawH = FRAME_H * SCALE;
+  const drawX = (canvas.width - drawW) / 2;
+  const drawY = (canvas.height - drawH) / 2;
+
+  ctx.drawImage(img, srcX, srcY, FRAME_W, FRAME_H, drawX, drawY, drawW, drawH);
+
+  // Direction label
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '14px monospace';
+  ctx.fillText(`${currentChar} ${currentAnim} ${currentDir}`, 8, 20);
+  ctx.fillText(`frame ${frameIdx} (${currentFrame}/5)`, 8, 38);
+
+  document.getElementById('frameInfo').textContent =
+    `${currentChar} / ${currentAnim} / ${currentDir} — frame index ${frameIdx} (local ${currentFrame}/5)`;
+}
+
+// Build UI
+function buildButtons(containerId, items, current, onClick) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.textContent = item;
+    btn.className = item === current ? 'active' : '';
+    btn.onclick = () => {
+      onClick(item);
+      buildButtons(containerId, items, item, onClick);
+    };
+    container.appendChild(btn);
+  }
+}
+
+buildButtons('charBtns', CHARS, currentChar, c => { currentChar = c; currentFrame = 0; updateAllDirs(); });
+buildButtons('animBtns', ANIMS, currentAnim, a => { currentAnim = a; currentFrame = 0; updateAllDirs(); });
+buildButtons('dirBtns', DIRS, currentDir, d => { currentDir = d; currentFrame = 0; });
+
+// All directions mini preview
+function updateAllDirs() {
+  const container = document.getElementById('allDirs');
+  container.innerHTML = '';
+
+  for (const dir of DIRS) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; margin:4px 0; cursor:pointer;';
+    row.onclick = () => {
+      currentDir = dir;
+      currentFrame = 0;
+      buildButtons('dirBtns', DIRS, currentDir, d => { currentDir = d; currentFrame = 0; });
+    };
+
+    const label = document.createElement('span');
+    label.className = 'dir-label';
+    label.textContent = dir;
+    row.appendChild(label);
+
+    const offset = DIR_OFFSETS[dir];
+    for (let f = 0; f < 6; f++) {
+      const c = document.createElement('canvas');
+      c.width = FRAME_W * 3;
+      c.height = FRAME_H * 3;
+      c.style.cssText = 'image-rendering:pixelated; margin:0 1px;';
+      const cCtx = c.getContext('2d');
+      cCtx.imageSmoothingEnabled = false;
+
+      const key = `${currentChar}_${currentAnim}`;
+      const img = images[key];
+      if (img && img.complete) {
+        cCtx.drawImage(img, (offset + f) * FRAME_W, 0, FRAME_W, FRAME_H, 0, 0, c.width, c.height);
+      }
+      row.appendChild(c);
+
+      const num = document.createElement('span');
+      num.style.cssText = 'color:#666; font-size:9px; margin-right:2px;';
+      num.textContent = offset + f;
+      row.appendChild(num);
+    }
+
+    container.appendChild(row);
+  }
+}
+
+// Wait for images then build
+setTimeout(updateAllDirs, 500);
+</script>
+</body>
+</html>
