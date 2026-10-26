@@ -11,7 +11,6 @@ import { createPathfinder } from './Pathfinding.js';
 const TICK_RATE = 60;
 const TICK_MS = 1000 / TICK_RATE;
 const BROADCAST_EVERY = 3; // send state every 3 ticks (~20Hz)
-const BOT_COUNT = 100;
 const PLAYER_SPEED = 220; // px/s
 const PICKUP_RANGE = 40;
 const MAX_HISTORY = 60; // 1 second of snapshots
@@ -23,7 +22,9 @@ function activeSlotForPlayer(p) {
 }
 
 export class GameServer {
-  constructor(io, mode = 'normal') {
+  constructor(io, mode = 'normal', {botCount=100}={}) {
+    if(!Number.isInteger(botCount)||botCount<0||botCount>100)throw Error('botCount must be 0..100');
+    this.botCount=botCount;
     this.io = io;
     this.worldRevision=randomUUID();
     this.mode = mode; // 'normal' or 'arena'
@@ -112,7 +113,7 @@ export class GameServer {
     }
     const spawned = [];
     for (const t of available) {
-      if (spawned.length >= BOT_COUNT) break;
+      if (spawned.length >= this.botCount) break;
       const px = t.x * TILE_PX + TILE_PX / 2;
       const py = t.y * TILE_PX + TILE_PX / 2;
       // Check distance from all already-spawned bots
@@ -128,7 +129,7 @@ export class GameServer {
       spawned.push({ x: px, y: py });
       this.bots.push(new Bot(px, py));
     }
-    console.log(`Spawned ${this.bots.length} bots (target: ${BOT_COUNT}, min spacing: ${MIN_SPAWN_DIST}px)`);
+    console.log(`Spawned ${this.bots.length} bots (target: ${this.botCount}, min spacing: ${MIN_SPAWN_DIST}px)`);
   }
 
   _spawnArenaBots() {

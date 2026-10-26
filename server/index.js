@@ -7,13 +7,16 @@ import {GameServer} from './GameServer.js';
 import {NAMESPACE,LATEST} from '../shared/network.js';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../client/public');
 let game,lastRestart=0,hostId=null;
+const worldOptions={botCount:Number(process.env.BOT_COUNT??100)};
+const maxPlayers=Number(process.env.MAX_PLAYERS??32);
+if(!Number.isInteger(maxPlayers)||maxPlayers<1||maxPlayers>32)throw Error('MAX_PLAYERS must be 1..32');
 const io=await createEventServer({namespace:NAMESPACE,latest:LATEST,port:Number(process.env.PORT??3000),host:'0.0.0.0',
-  origins:origin=>/^https?:\/\//.test(origin),maxSessions:32,resumeGraceMs:30_000,
+  origins:origin=>/^https?:\/\//.test(origin),maxSessions:maxPlayers,resumeGraceMs:30_000,
   endpoint:{bytesPerSecond:768*1024,burstBytes:192*1024},
   rtc:process.env.RTC==='0'?undefined:await createNativeRtcFactory({port:Number(process.env.RTC_PORT??3001)}),
   http(req,res){
     let url;try{url=new URL(req.url,'http://localhost');}catch{res.writeHead(400);res.end();return;}
-    if(url.pathname==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,twinwire:'2.2.0',wire:4,players:game?.players.size,sessions:io.game.sessions.size,worldRevision:game?.worldRevision}));return;}
+    if(url.pathname==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,twinwire:'2.2.0',wire:4,players:game?.players.size,sessions:io.game.sessions.size,maxPlayers,bots:game?.bots.length,mode:game?.mode,worldRevision:game?.worldRevision}));return;}
     if(url.pathname==='/api/world/'+game?.worldRevision){res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(game.publicWorld()));return;}
     let relative;try{relative=decodeURIComponent(url.pathname==='/'?'/index.html':url.pathname);}catch{res.writeHead(400);res.end();return;}
     const file=path.resolve(root,'.'+relative);
@@ -24,7 +27,7 @@ const io=await createEventServer({namespace:NAMESPACE,latest:LATEST,port:Number(
     });
   },
 });
-const mode=process.env.GAME_MODE||'arena';game=new GameServer(io,mode);
+const mode=process.env.GAME_MODE||'arena';game=new GameServer(io,mode,worldOptions);
 io.onConnection(channel=>{
   hostId??=channel.id;game.addPlayer(channel);
   channel.on('input',data=>game.handleInput(channel.id,data));
@@ -35,7 +38,7 @@ io.onConnection(channel=>{
   channel.onDisconnect(()=>{game.removePlayer(channel.id);if(hostId===channel.id)hostId=io.channels.keys().next().value??null;});
   channel.on('restart_server',()=>{
     if(channel.id!==hostId||performance.now()-lastRestart<30_000)return;lastRestart=performance.now();
-    game.stop();game=new GameServer(io,mode);for(const peer of io.channels.values())game.addPlayer(peer);game.start();
+    game.stop();game=new GameServer(io,mode,worldOptions);for(const peer of io.channels.values())game.addPlayer(peer);game.start();
   });
 });
 const port=await io.listen();game.start();console.log('TDBR Twinwire on http://127.0.0.1:'+port);
