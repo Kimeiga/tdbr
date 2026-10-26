@@ -1,5 +1,6 @@
-// Client — Phaser 4 + Socket.IO — LimeZu Art Style
-import { io } from 'socket.io-client';
+// Client — Phaser 4 + Twinwire — LimeZu Art Style
+import {createEventClient} from 'twinwire/client';
+import {NAMESPACE,LATEST} from '../../shared/network.js';
 import { FOV } from 'rot-js';
 
 const TILE_PX = 48;
@@ -37,6 +38,8 @@ let channel = null;
 let myId = null;
 let connected = false;
 let latency = 0;
+let worldRevision=null,loadedRevision=null,initEpoch=0;
+let pendingEvents=[];
 
 // ─── State from server ────────────────────────────────────────────
 let serverPlayers = [];
@@ -397,7 +400,7 @@ function create() {
 // ═══════════════════════════════════════════════════════════════════
 
 function update(time, delta) {
-  if (!connected || !myId) return;
+  if (!connected || !myId || !channel.ready('state') || loadedRevision!==worldRevision) return;
   const dt = delta / 1000;
 
   // ── Arena spectator mode — skip all player input ─────────
@@ -459,7 +462,7 @@ function update(time, delta) {
   };
 
   applyInput(input, 1 / 60);
-  pendingInputs.push(input);
+  pendingInputs.push(input);if(pendingInputs.length>120)pendingInputs.shift();
   channel.emit('input', input);
 
   // ── Footstep sounds ─────────────────────────────────────
@@ -548,11 +551,20 @@ function update(time, delta) {
 // ═══════════════════════════════════════════════════════════════════
 
 function connectToServer(scene) {
-  channel = io(`http://${location.hostname}:${location.port || 3000}`);
+  const url=new URL('/connect',location.href);url.protocol=location.protocol==='https:'?'wss:':'ws:';
+  channel=createEventClient({url:url.href,room:NAMESPACE,latest:LATEST,stateMaxAgeMs:250,rtc:new URLSearchParams(location.search).get('rtc')==='0'?false:undefined});
+  channel.net.bindPageLifecycle();
+  channel.onPause=()=>{connected=false;};
+  channel.onReset=()=>{initEpoch++;loadedRevision=null;pendingInputs=[];pendingEvents=[];serverPlayers=[];serverBots=[];serverProjectiles=[];};
 
-  channel.on('connect', () => { connected = true; console.log('Connected'); });
+  channel.onConnect(() => { connected = true; console.log('Connected'); });
 
-  channel.on('init', data => {
+  channel.on('init', async initial => {
+    const epoch=++initEpoch;worldRevision=initial.worldRevision;loadedRevision=null;pendingInputs=[];pendingEvents=[];
+    let world;try{const response=await fetch(initial.worldURL,{cache:'no-store'});if(!response.ok)throw Error('World bootstrap unavailable');world=await response.json();}
+    catch(error){console.error(error);return;}
+    if(epoch!==initEpoch||world.worldRevision!==worldRevision)return;
+    const data={...world,...initial};
     console.time('init_total');
     myId = data.playerId;
     gameStartTime = Date.now();
@@ -588,16 +600,19 @@ function connectToServer(scene) {
     console.timeEnd('buildTilemap');
     buildFogOfWar(scene);
     console.timeEnd('init_total');
+    loadedRevision=data.worldRevision;
     console.log(`Init: id=${myId} map=${mapSize}x${mapSize}`);
   });
 
+  channel.on('game-events',data=>{if(data.worldRevision===worldRevision){pendingEvents.push(...data.events);if(pendingEvents.length>256)pendingEvents.splice(0,pendingEvents.length-256);}});
   channel.on('state', data => {
+    if(data.worldRevision!==loadedRevision)return false;
     serverTick = data.tick;
     serverPlayers = data.players;
     serverBots = data.bots;
     serverProjectiles = data.projectiles;
     serverZone = data.zone;
-    serverEvents = data.events || [];
+    serverEvents = pendingEvents.splice(0);
     serverLeaderboard = data.leaderboard || [];
     reconcile();
     processEvents(scene);
@@ -1857,7 +1872,7 @@ window.__game = {
       .map(b => ({ ...b, dist: Math.round(Math.hypot(b.x - predictedX, b.y - predictedY)) }))
       .sort((a, b) => a.dist - b.dist).slice(0, 20);
     return {
-      connected, myId,
+      connected, myId, transport:channel?.transport,ready:channel?.ready('state'),worldRevision,
       player: me ? { x: Math.round(predictedX), y: Math.round(predictedY), hp: me.hp, alive: me.alive, inventory: me.inventory } : null,
       nearbyBots, totalBots: serverBots.length,
       players: serverPlayers.map(p => ({ id: p.id, x: Math.round(p.x), y: Math.round(p.y), hp: p.hp, alive: p.alive })),
@@ -1867,7 +1882,7 @@ window.__game = {
   sendInput(keys, angle) {
     if (!channel || !connected) return;
     const inp = { seq: ++inputSeq, keys: { w: false, a: false, s: false, d: false, shift: false, ctrl: false, ...keys }, angle: angle || 0 };
-    applyInput(inp, 1 / 60); pendingInputs.push(inp);
+    applyInput(inp, 1 / 60); pendingInputs.push(inp);if(pendingInputs.length>120)pendingInputs.shift();
     channel.emit('input', inp);
   },
   moveTo(x, y) {

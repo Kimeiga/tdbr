@@ -6,15 +6,16 @@
     "build": "esbuild client/src/main.js --bundle --outfile=client/public/bundle.js --format=iife --platform=browser --external:phaser",
     "start": "node server/index.js",
     "dev": "npm run build && npm start",
-    "watch": "esbuild client/src/main.js --bundle --outfile=client/public/bundle.js --format=iife --platform=browser --external:phaser --watch=forever"
+    "watch": "esbuild client/src/main.js --bundle --outfile=client/public/bundle.js --format=iife --platform=browser --external:phaser --watch=forever",
+    "test:multiplayer": "node tools/test-twinwire.mjs"
   },
   "dependencies": {
-    "@geckos.io/client": "^3.0.2",
-    "@geckos.io/server": "^3.0.2",
     "esbuild": "^0.25.0",
     "pathfinding": "^0.4.18",
     "rot-js": "^2.2.1",
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3"
+    "twinwire": "2.2.0"
+  },
+  "optionalDependencies": {
+    "node-datachannel": "0.33.4"
   }
 }
