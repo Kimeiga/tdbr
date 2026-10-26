@@ -1,3 +1,4 @@
+import {randomUUID} from 'node:crypto';
 // GameServer.js — authoritative game loop coordinating all subsystems
 
 import { generateMap, generateArenaMap, isWalkable, MAP_SIZE, TILE_PX } from './MapGenerator.js';
@@ -24,6 +25,7 @@ function activeSlotForPlayer(p) {
 export class GameServer {
   constructor(io, mode = 'normal') {
     this.io = io;
+    this.worldRevision=randomUUID();
     this.mode = mode; // 'normal' or 'arena'
 
     // Register weapon defs for LootManager ammo loading
@@ -223,7 +225,17 @@ export class GameServer {
     return { x: t.x * TILE_PX + TILE_PX / 2, y: t.y * TILE_PX + TILE_PX / 2 };
   }
 
+  publicWorld(){
+    return {worldRevision:this.worldRevision,map:Array.from(this.flatGrid),mapSize:this.mapSizeActual,tilePx:TILE_PX,
+      bots:this.bots.map(b=>b.serialize()),loot:this.loot.filter(l=>!l.pickedUp),zone:this.zone.serialize(),wallVariants:Array.from(this.wallVariants),mode:this.mode};
+  }
+
+  _sendInit(socket,playerState){
+    socket.emit('init',{playerId:socket.id,playerState,worldRevision:this.worldRevision,worldURL:'/api/world/'+this.worldRevision});
+  }
+
   addPlayer(socket) {
+    if(this.players.has(socket.id)){this._sendInit(socket,this._serializePlayer(this.players.get(socket.id)));return;}
     if (this.mode === 'arena') {
       // Arena mode: player is a spectator, no playable character
       const sz = this.mapSizeActual;
@@ -235,18 +247,7 @@ export class GameServer {
         inventory: { primary: null, secondary: null, tactical: [], consumables: [], ammo: {}, magAmmo: {} },
       };
       // Don't add to this.players — spectator only
-      socket.emit('init', {
-        playerId: socket.id,
-        map: Array.from(this.flatGrid),
-        mapSize: this.mapSizeActual,
-        tilePx: TILE_PX,
-        playerState: spectatorState,
-        bots: this.bots.map(b => b.serialize()),
-        loot: this.loot.filter(l => !l.pickedUp),
-        zone: this.zone.serialize(),
-        wallVariants: Array.from(this.wallVariants),
-        mode: this.mode,
-      });
+      this._sendInit(socket,spectatorState);
       return;
     }
 
@@ -279,18 +280,7 @@ export class GameServer {
     this.players.set(socket.id, p);
 
     // Send init data
-    socket.emit('init', {
-      playerId: socket.id,
-      map: Array.from(this.flatGrid),
-      mapSize: this.mapSizeActual,
-      tilePx: TILE_PX,
-      playerState: this._serializePlayer(p),
-      bots: this.bots.map(b => b.serialize()),
-      loot: this.loot.filter(l => !l.pickedUp),
-      zone: this.zone.serialize(),
-      wallVariants: Array.from(this.wallVariants),
-      mode: this.mode,
-    });
+    this._sendInit(socket,this._serializePlayer(p));
   }
 
   removePlayer(channelId) {
@@ -305,7 +295,10 @@ export class GameServer {
       // Game auto-restarts when all humans are dead.
       return;
     }
-    p.inputs.push(data);
+    if(!data || !Number.isSafeInteger(data.seq) || data.seq<0 || !Number.isFinite(data.angle) || !data.keys || typeof data.keys!=='object')return;
+    if(data.seq<=(p.intent?.seq??p.lastSeq))return;
+    p.intent={seq:data.seq,angle:data.angle,keys:Object.fromEntries(['w','a','s','d','shift','ctrl'].map(k=>[k,Boolean(data.keys[k])]))};
+    p.lastInputAt=performance.now();
   }
 
   handleFire(channelId, data) {
@@ -559,8 +552,8 @@ export class GameServer {
   _processPlayerInputs(dt) {
     for (const [pid, p] of this.players) {
       if (!p.alive) continue;
-      while (p.inputs.length > 0) {
-        const input = p.inputs.shift();
+      if (p.intent && performance.now()-p.lastInputAt<=200) {
+        const input = p.intent;
         let vx = 0, vy = 0;
         if (input.keys) {
           if (input.keys.a) vx -= 1;
@@ -815,10 +808,13 @@ export class GameServer {
       bots: botStates,
       projectiles: projStates,
       zone: this.zone.serialize(),
-      events: this.events,
+      events: [],
+      worldRevision:this.worldRevision,
       leaderboard,
     };
 
+    // Cosmetic/action notifications are reliable for currently connected viewers; paused viewers get a current bootstrap.
+    for(const channel of this.io.channels.values())if(channel.connected && this.events.length)channel.emit('game-events',{worldRevision:this.worldRevision,events:this.events});
     this.io.emit('state', payload);
     this.events = [];
   }
@@ -971,6 +967,7 @@ export class GameServer {
   }
 
   _resetGame() {
+    this.worldRevision=randomUUID();
     console.log('Auto-restart: regenerating...');
     const sz = this.mapSizeActual;
 
@@ -1025,7 +1022,7 @@ export class GameServer {
     this.killCounts = new Map();
 
     // Respawn/re-init all connected sockets
-    for (const [, socket] of this.io.sockets.sockets) {
+    for (const [, socket] of this.io.channels) {
       if (this.mode === 'arena') {
         // Re-send spectator init
         const sz = this.mapSizeActual;
@@ -1036,18 +1033,7 @@ export class GameServer {
           vestLevel: 0, helmetLevel: 0,
           inventory: { primary: null, secondary: null, tactical: [], consumables: [], ammo: {}, magAmmo: {} },
         };
-        socket.emit('init', {
-          playerId: socket.id,
-          map: Array.from(this.flatGrid),
-          mapSize: this.mapSizeActual,
-          tilePx: TILE_PX,
-          playerState: spectatorState,
-          bots: this.bots.map(b => b.serialize()),
-          loot: this.loot.filter(l => !l.pickedUp),
-          zone: this.zone.serialize(),
-          wallVariants: Array.from(this.wallVariants),
-          mode: this.mode,
-        });
+        this._sendInit(socket,spectatorState);
       } else {
         const p = this.players.get(socket.id);
         if (p) {
@@ -1055,7 +1041,7 @@ export class GameServer {
           p.x = pos.x; p.y = pos.y;
           p.hp = p.maxHp; p.alive = true;
           p.spawnProtection = 180;
-          p.inputs = [];
+          p.inputs = []; p.intent=null;
           p.reloading = false;
           p.boost = 0;
           p.inventory = createInventory();
@@ -1063,18 +1049,7 @@ export class GameServer {
           p.inventory.ammo['9mm'] = 60;
           p.inventory.magAmmo.primary = WEAPON_DEFS.pistol.magSize;
         }
-        socket.emit('init', {
-          playerId: socket.id,
-          map: Array.from(this.flatGrid),
-          mapSize: this.mapSizeActual,
-          tilePx: TILE_PX,
-          playerState: this._serializePlayer(this.players.get(socket.id)),
-          bots: this.bots.map(b => b.serialize()),
-          loot: this.loot.filter(l => !l.pickedUp),
-          zone: this.zone.serialize(),
-          wallVariants: Array.from(this.wallVariants),
-          mode: this.mode,
-        });
+        this._sendInit(socket,this._serializePlayer(this.players.get(socket.id)));
       }
     }
   }

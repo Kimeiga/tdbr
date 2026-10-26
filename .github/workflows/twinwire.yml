@@ -1,0 +1,23 @@
+name: Twinwire game recovery
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: game-recovery-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  gameplay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: {node-version: '22', cache: npm}
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: Gameplay and retained world on WebSocket
+        run: npm run test:multiplayer
+      - name: Gameplay and retained world on native RTC
+        run: TEST_RTC=1 npm run test:multiplayer
