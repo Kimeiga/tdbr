@@ -13,7 +13,7 @@
     "esbuild": "^0.25.0",
     "pathfinding": "^0.4.18",
     "rot-js": "^2.2.1",
-    "twinwire": "2.2.0"
+    "twinwire": "3.0.0"
   },
   "optionalDependencies": {
     "node-datachannel": "0.33.4"
