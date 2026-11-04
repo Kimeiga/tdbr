@@ -552,7 +552,7 @@ function update(time, delta) {
 
 function connectToServer(scene) {
   const url=new URL('/connect',location.href);url.protocol=location.protocol==='https:'?'wss:':'ws:';
-  channel=createEventClient({url:url.href,room:NAMESPACE,latest:LATEST,stateMaxAgeMs:250,rtc:new URLSearchParams(location.search).get('rtc')==='0'?false:undefined});
+  channel=createEventClient({url:url.href,room:NAMESPACE,latest:LATEST,stateMaxAgeMs:250,rtc:new URLSearchParams(location.search).get('rtc')==='0'?false:undefined,webtransport:new URLSearchParams(location.search).get('rtc')==='0'?false:undefined});
   channel.net.bindPageLifecycle();
   channel.onPause=()=>{connected=false;};
   channel.onReset=()=>{initEpoch++;loadedRevision=null;pendingInputs=[];pendingEvents=[];serverPlayers=[];serverBots=[];serverProjectiles=[];};

@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createEventServer,createNativeRtcFactory} from 'twinwire/server';
+import {VERSION as WIRE_VERSION} from 'twinwire';
+import twinwirePackage from 'twinwire/package.json' with {type:'json'};
 import {GameServer} from './GameServer.js';
 import {NAMESPACE,LATEST} from '../shared/network.js';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../client/public');
@@ -16,7 +18,7 @@ const io=await createEventServer({namespace:NAMESPACE,latest:LATEST,port:Number(
   rtc:process.env.RTC==='0'?undefined:await createNativeRtcFactory({port:Number(process.env.RTC_PORT??3001)}),
   http(req,res){
     let url;try{url=new URL(req.url,'http://localhost');}catch{res.writeHead(400);res.end();return;}
-    if(url.pathname==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,twinwire:'2.2.0',wire:4,players:game?.players.size,sessions:io.game.sessions.size,maxPlayers,bots:game?.bots.length,mode:game?.mode,worldRevision:game?.worldRevision}));return;}
+    if(url.pathname==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,twinwire:twinwirePackage.version,wire:WIRE_VERSION,players:game?.players.size,sessions:io.game.sessions.size,maxPlayers,bots:game?.bots.length,mode:game?.mode,worldRevision:game?.worldRevision}));return;}
     if(url.pathname==='/api/world/'+game?.worldRevision){res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(game.publicWorld()));return;}
     let relative;try{relative=decodeURIComponent(url.pathname==='/'?'/index.html':url.pathname);}catch{res.writeHead(400);res.end();return;}
     const file=path.resolve(root,'.'+relative);

@@ -1,36 +1,136 @@
 (() => {
   // node_modules/twinwire/dist/core/budget.js
-  var TokenBucket = class {
-    rate;
+  var TrafficBudget = class {
+    credit;
     capacity;
-    tokens;
+    rates;
     at;
-    constructor(rate, capacity, now) {
-      this.rate = rate;
-      this.capacity = capacity;
-      if (!(rate > 0) || !Number.isFinite(rate) || !(capacity > 0) || !Number.isFinite(capacity))
-        throw new RangeError("Invalid budget");
-      this.tokens = capacity;
+    constructor(rate, burst, stateShare, now) {
+      if (![rate, burst, stateShare, now].every(Number.isFinite) || rate <= 0 || burst <= 0 || stateShare <= 0 || stateShare >= 1)
+        throw new RangeError("Invalid traffic budget");
+      this.capacity = [burst * stateShare, burst * (1 - stateShare)];
+      this.rates = [rate * stateShare, rate * (1 - stateShare)];
+      this.credit = [...this.capacity];
       this.at = now;
     }
-    available(now) {
-      this.tokens = Math.min(this.capacity, this.tokens + Math.max(0, now - this.at) * this.rate / 1e3);
+    /** Returns a one-use refund when reserved, or null. A rejected transport write must refund its exact debits. */
+    reserve(kind, bytes, now, protectedOtherBytes) {
+      if (!Number.isFinite(bytes) || bytes < 0 || !Number.isFinite(now))
+        throw new RangeError("Invalid traffic reservation");
+      const dt = Math.max(0, now - this.at) / 1e3;
       this.at = Math.max(this.at, now);
-      return this.tokens;
-    }
-    /** A message larger than the burst may go once the bucket is full; the debt then delays what follows. */
-    take(bytes, now) {
-      if (!Number.isFinite(bytes) || bytes < 0)
-        throw new RangeError("Invalid byte count");
-      if (this.available(now) < Math.min(bytes, this.capacity))
-        return false;
-      this.tokens -= bytes;
-      return true;
+      this.credit[0] = Math.min(this.capacity[0], this.credit[0] + dt * this.rates[0]);
+      this.credit[1] = Math.min(this.capacity[1], this.credit[1] + dt * this.rates[1]);
+      const own = kind === "state" ? 0 : 1, other = own === 0 ? 1 : 0;
+      const surplus = Math.max(0, this.credit[other] - Math.min(this.capacity[other], protectedOtherBytes));
+      const loan = Math.min(surplus, this.capacity[own] - this.credit[own]);
+      this.credit[own] += loan;
+      this.credit[other] -= loan;
+      if (this.credit[own] < Math.min(bytes, this.capacity[own]))
+        return null;
+      this.credit[own] -= bytes;
+      let refunded = false;
+      return () => {
+        if (refunded)
+          return;
+        refunded = true;
+        this.credit[own] = Math.min(this.capacity[own], this.credit[own] + bytes);
+      };
     }
   };
 
+  // node_modules/twinwire/dist/core/clone.js
+  var typedArrays = {
+    "[object Int8Array]": Int8Array,
+    "[object Uint8Array]": Uint8Array,
+    "[object Uint8ClampedArray]": Uint8ClampedArray,
+    "[object Int16Array]": Int16Array,
+    "[object Uint16Array]": Uint16Array,
+    "[object Int32Array]": Int32Array,
+    "[object Uint32Array]": Uint32Array,
+    "[object Float32Array]": Float32Array,
+    "[object Float64Array]": Float64Array,
+    "[object BigInt64Array]": BigInt64Array,
+    "[object BigUint64Array]": BigUint64Array
+  };
+  function cloneNetcodeValue(value) {
+    if (typeof globalThis.structuredClone === "function")
+      return globalThis.structuredClone(value);
+    const seen = /* @__PURE__ */ new Map();
+    const clone = (source) => {
+      if (source === null || typeof source !== "object") {
+        if (typeof source === "function" || typeof source === "symbol")
+          throw new TypeError("Input value is not cloneable");
+        return source;
+      }
+      if (seen.has(source))
+        return seen.get(source);
+      if (source instanceof Date) {
+        const result2 = new Date(source.getTime());
+        seen.set(source, result2);
+        return result2;
+      }
+      if (source instanceof RegExp) {
+        const result2 = new RegExp(source.source, source.flags);
+        seen.set(source, result2);
+        return result2;
+      }
+      if (source instanceof ArrayBuffer) {
+        const result2 = source.slice(0);
+        seen.set(source, result2);
+        return result2;
+      }
+      if (ArrayBuffer.isView(source)) {
+        const buffer = clone(source.buffer);
+        let result2;
+        if (source instanceof DataView)
+          result2 = new DataView(buffer, source.byteOffset, source.byteLength);
+        else {
+          const Ctor = typedArrays[Object.prototype.toString.call(source)];
+          if (!Ctor)
+            throw new TypeError("Unsupported input view; provide a custom clone function");
+          result2 = new Ctor(buffer, source.byteOffset, source.byteLength / Ctor.BYTES_PER_ELEMENT);
+        }
+        seen.set(source, result2);
+        return result2;
+      }
+      if (source instanceof Map) {
+        const result2 = /* @__PURE__ */ new Map();
+        seen.set(source, result2);
+        for (const [key, item] of source)
+          result2.set(clone(key), clone(item));
+        return result2;
+      }
+      if (source instanceof Set) {
+        const result2 = /* @__PURE__ */ new Set();
+        seen.set(source, result2);
+        for (const item of source)
+          result2.add(clone(item));
+        return result2;
+      }
+      const array = Array.isArray(source);
+      if (!array) {
+        const prototype = Object.getPrototypeOf(source);
+        if (prototype !== Object.prototype && prototype !== null)
+          throw new TypeError("Unsupported input object; provide a custom clone function");
+      }
+      const result = array ? new Array(source.length) : {};
+      seen.set(source, result);
+      for (const key of Object.keys(source)) {
+        Object.defineProperty(result, key, {
+          value: clone(source[key]),
+          enumerable: true,
+          writable: true,
+          configurable: true
+        });
+      }
+      return result;
+    };
+    return clone(value);
+  }
+
   // node_modules/twinwire/dist/core/protocol.js
-  var VERSION = 4;
+  var VERSION = 5;
   var HEADER_BYTES = 14;
   var MTU_STATE_BYTES = 1100 - HEADER_BYTES;
   var MAX_FRAME_BYTES = 256 * 1024;
@@ -77,7 +177,7 @@
     }
     if (!KINDS.has(kind) || !epoch || stream > 65535 || at + 8 > b.byteLength || empty(kind) && b.byteLength !== at + 8 || !streamed(kind) && stream !== 0)
       return null;
-    return { kind, epoch, stream, seq: v.getUint32(at, true), time: base + v.getInt32(at + 4, true) / TIME_UNITS, payload: b.slice(at + 8) };
+    return { kind, epoch, stream, seq: v.getUint32(at, true), time: base + v.getInt32(at + 4, true) / TIME_UNITS, payload: new Uint8Array(b.subarray(at + 8)) };
   }
   function newer(a, b) {
     return a !== b && a - b >>> 0 < 2147483648;
@@ -177,6 +277,9 @@
     get sentThrough() {
       return this.highestSent;
     }
+    get queuedThrough() {
+      return this.next - 1;
+    }
     entries() {
       return this.pending.values();
     }
@@ -259,7 +362,7 @@
         next: this.next,
         received: this.received,
         acknowledged: this.acknowledged,
-        pending: Array.from(this.pending.values(), (e) => ({ seq: e.seq, data: structuredClone(e.data) }))
+        pending: Array.from(this.pending.values(), (e) => ({ seq: e.seq, data: cloneNetcodeValue(e.data) }))
       };
     }
     restore(s) {
@@ -312,7 +415,8 @@
       impairedDrops: 0,
       impairedStalls: 0,
       eventsRejected: 0,
-      callbackErrors: 0
+      callbackErrors: 0,
+      traceErrors: 0
     };
     onState = () => {
     };
@@ -333,7 +437,12 @@
     onStateAck = () => {
     };
     reliable;
-    datagram;
+    paths = /* @__PURE__ */ new Map();
+    selected;
+    switchedAt = -Infinity;
+    preferred;
+    switchHold;
+    switchMargin;
     epoch = 0;
     /** The connection's time base (from the welcome): frame times travel relative to it. */
     timeBase = 0;
@@ -349,14 +458,11 @@
     lastEventSent = 0;
     datagramAcked = 0;
     ackDue = false;
-    lastProbe = -Infinity;
-    proofAt = -Infinity;
-    attachedAt = 0;
-    probes = /* @__PURE__ */ new Map();
     probeSeq = 0;
-    fast = false;
     now;
     budget;
+    lastStateAt = -Infinity;
+    lastStateBytes = 0;
     highWater;
     maxStreams;
     probeInterval;
@@ -366,10 +472,19 @@
     datagramEvents;
     stateAckInterval;
     impairment;
+    trace;
+    traceClock;
     constructor(o = {}) {
+      this.trace = o.trace;
+      this.traceClock = o.traceClock;
+      this.preferred = o.preferredDatagram ?? "wt";
+      this.switchHold = o.pathSwitchHoldMs ?? 1e3;
+      this.switchMargin = o.pathSwitchMarginMs ?? 5;
+      if (!["rtc", "wt"].includes(this.preferred) || !Number.isFinite(this.switchHold) || this.switchHold < 0 || !Number.isFinite(this.switchMargin) || this.switchMargin < 0)
+        throw new RangeError("Invalid path selection policy");
       this.now = o.now ?? (() => performance.now());
       const rate = o.bytesPerSecond ?? 32 * 1024;
-      this.budget = new TokenBucket(rate, o.burstBytes ?? Math.max(rate / 2, 16 * 1024), this.now());
+      this.budget = new TrafficBudget(rate, o.burstBytes ?? Math.max(rate / 2, 16 * 1024), o.stateBudgetShare ?? 0.5, this.now());
       this.highWater = o.maxBufferedBytes ?? 64 * 1024;
       this.maxStreams = o.maxStreams ?? 1024;
       this.probeInterval = o.probeIntervalMs ?? 250;
@@ -380,7 +495,7 @@
       this.deliverLate = o.lateStates === "deliver";
       this.stateAckInterval = o.stateAckIntervalMs ?? 50;
       this.events = new ReliableEvents(o.events);
-      if (!(this.highWater > 0) || !isUint(this.maxStreams, 65536) || this.maxStreams < 1 || !(this.probeInterval >= 10) || !(this.probeTimeout >= this.probeInterval * 2) || !isUint(this.maxStateBytes, MAX_STATE_BYTES) || this.maxStateBytes < 1 || !(this.datagramStateBytes >= MTU_STATE_BYTES) || !(this.stateAckInterval >= 0))
+      if (!(this.highWater > 0) || !isUint(this.maxStreams, 65536) || this.maxStreams < 1 || !(this.probeInterval >= 10) || !(this.probeTimeout >= this.probeInterval * 2) || !isUint(this.maxStateBytes, MAX_STATE_BYTES) || this.maxStateBytes < 1 || !isUint(this.datagramStateBytes, MAX_STATE_BYTES) || !(this.stateAckInterval >= 0))
         throw new RangeError("Invalid endpoint limits");
       if (o.impair)
         this.setImpairment(o.impair);
@@ -389,7 +504,50 @@
       return !!this.reliable?.open;
     }
     get fastActive() {
-      return this.fast && !!this.datagram?.open && this.now() - this.proofAt <= this.probeTimeout;
+      return this.fastTransport !== void 0;
+    }
+    datagramProven(via) {
+      const path = this.paths.get(via);
+      return !!path?.link.open && path.proven && this.now() - path.proofAt <= this.probeTimeout;
+    }
+    /** Proven paths only. Hysteresis avoids oscillating between comparable RTT measurements. */
+    get fastTransport() {
+      if (!this.paths.size) {
+        if (this.selected !== void 0) {
+          this.selected = void 0;
+          this.switchedAt = this.now();
+          this.stats.fastTransitions++;
+          this.onFastChange(false);
+        }
+        return void 0;
+      }
+      const now = this.now(), candidates = [...this.paths.keys()].filter((v) => this.datagramProven(v));
+      let next = this.selected && this.datagramProven(this.selected) ? this.selected : void 0;
+      const better = (a, b) => {
+        const ar = this.paths.get(a).rttMs, br = this.paths.get(b).rttMs;
+        return ar < br - this.switchMargin || a === this.preferred && b !== this.preferred && ar <= br + this.switchMargin;
+      };
+      for (const candidate of candidates)
+        if (!next || (now - this.switchedAt >= this.switchHold || !this.selected || !this.datagramProven(this.selected)) && better(candidate, next))
+          next = candidate;
+      if (next !== this.selected) {
+        this.selected = next;
+        this.switchedAt = now;
+        this.stats.fastTransitions++;
+        this.onFastChange(next !== void 0);
+      }
+      if (next)
+        this.stats.datagramRttMs = this.paths.get(next).rttMs;
+      return next;
+    }
+    get datagramPaths() {
+      return [...this.paths].map(([via, p]) => ({
+        via,
+        proven: this.datagramProven(via),
+        rttMs: p.proven ? p.rttMs : null,
+        maxMessageBytes: p.link.maxMessageBytes ?? null,
+        bufferedAmount: p.link.bufferedAmount
+      }));
     }
     get pendingStates() {
       return this.queued.size;
@@ -399,6 +557,28 @@
     }
     get maxFrameBytes() {
       return this.maxStateBytes + HEADER_BYTES;
+    }
+    /** Mark application/playback/render boundaries with the same correlation metadata as transport traces. */
+    traceState(stage, state, details = {}) {
+      if (!this.trace)
+        return;
+      try {
+        const clock = this.traceClock?.();
+        this.trace({
+          stage,
+          epoch: this.epoch,
+          stream: state.stream,
+          seq: state.seq,
+          localTimeMs: this.now(),
+          sourceTimeMs: state.time,
+          bytes: state.data?.length ?? 0,
+          via: state.via,
+          ...details,
+          ...clock && Number.isFinite(clock.serverTimeMs) && Number.isFinite(clock.uncertaintyMs) ? { snapshotAgeMs: clock.serverTimeMs - state.time, clockUncertaintyMs: clock.uncertaintyMs } : {}
+        });
+      } catch {
+        this.stats.traceErrors++;
+      }
     }
     /** Newest seq the peer reported for an acknowledged stream in this connection epoch. */
     stateAck(stream) {
@@ -442,33 +622,34 @@
       this.reliable = void 0;
       this.queued.clear();
     }
-    attachDatagram(link) {
-      this.dropDatagram(false);
-      this.datagram = this.impairDatagram(link);
-      this.attachedAt = this.now();
-      this.lastProbe = -Infinity;
-      this.proofAt = -Infinity;
-      this.probes.clear();
+    attachDatagram(link, via = "rtc") {
+      if (!["rtc", "wt"].includes(via) || link.maxMessageBytes !== void 0 && (!Number.isSafeInteger(link.maxMessageBytes) || link.maxMessageBytes < 1024))
+        throw new RangeError("Invalid datagram capabilities");
+      this.dropDatagram(false, via);
+      this.paths.set(via, {
+        link: this.impairDatagram(link),
+        attachedAt: this.now(),
+        lastProbe: -Infinity,
+        proofAt: -Infinity,
+        proven: false,
+        rttMs: 0,
+        probes: /* @__PURE__ */ new Map()
+      });
     }
-    dropDatagram(notify = true) {
-      const d = this.datagram;
-      this.datagram = void 0;
-      this.proofAt = -Infinity;
-      this.probes.clear();
-      this.setFast(false);
-      try {
-        d?.close();
-      } catch {
+    dropDatagram(notify = true, via) {
+      for (const kind of via ? [via] : [...this.paths.keys()]) {
+        const path = this.paths.get(kind);
+        if (!path)
+          continue;
+        this.paths.delete(kind);
+        try {
+          path.link.close();
+        } catch {
+        }
+        if (notify)
+          this.onFastDown(kind);
       }
-      if (d && notify)
-        this.onFastDown();
-    }
-    setFast(next) {
-      if (next !== this.fast) {
-        this.fast = next;
-        this.stats.fastTransitions++;
-        this.onFastChange(next);
-      }
+      void this.fastTransport;
     }
     sendControl(m) {
       const data = stringify(m), ws = this.reliable;
@@ -500,15 +681,23 @@
       const seq = (this.sequence.get(stream) ?? 0) + 1 >>> 0 || 1;
       this.sequence.set(stream, seq);
       const old = this.queued.get(stream);
-      if (old)
+      if (old) {
         this.stats.coalesced++;
+        if (this.trace)
+          this.traceState("discarded", { ...old.frame, data: old.frame.payload }, { reason: "coalesced" });
+      }
       const now = this.now();
+      this.lastStateAt = now;
+      this.lastStateBytes = data.length + HEADER_BYTES;
       this.queued.set(stream, {
-        frame: { kind: o.ack ? FrameKind.stateAcked : FrameKind.state, epoch: this.epoch, stream, seq, time, payload: data.slice() },
+        frame: { kind: o.ack ? FrameKind.stateAcked : FrameKind.state, epoch: this.epoch, stream, seq, time, payload: new Uint8Array(data) },
         first: old?.first ?? now,
+        enqueued: now,
         deadline: now + (o.ttlMs ?? 100),
         priority: o.priority ?? 1
       });
+      if (this.trace)
+        this.traceState("queued", { stream, seq, time, data });
       return seq;
     }
     receiveControl(m) {
@@ -545,28 +734,30 @@
         this.stats.invalid++;
         return;
       }
-      if (f.epoch !== this.epoch || via === "rtc" && !this.datagram) {
+      if (f.epoch !== this.epoch || via !== "ws" && !this.paths.has(via)) {
         this.stats.stale++;
         return;
       }
       switch (f.kind) {
         case FrameKind.probe:
-          if (via === "rtc")
-            this.sendFast(encodeFrame({ ...f, kind: FrameKind.reply }, this.timeBase));
+          if (via !== "ws")
+            this.sendFast(encodeFrame({ ...f, kind: FrameKind.reply }, this.timeBase), via);
           return;
         case FrameKind.reply: {
-          if (via !== "rtc")
+          if (via === "ws")
             return;
-          const sent = this.probes.get(f.seq);
+          const path = this.paths.get(via);
+          const sent = path.probes.get(f.seq);
           if (sent === void 0)
             return;
-          this.probes.delete(f.seq);
+          path.probes.delete(f.seq);
           const rtt = this.now() - sent;
           if (rtt < 0 || rtt > this.probeTimeout)
             return;
-          this.proofAt = this.now();
-          this.stats.datagramRttMs = rtt;
-          this.setFast(true);
+          path.proofAt = this.now();
+          path.rttMs = path.proven ? path.rttMs + 0.25 * (rtt - path.rttMs) : rtt;
+          path.proven = true;
+          void this.fastTransport;
           return;
         }
         case FrameKind.events:
@@ -598,6 +789,8 @@
           this.acksOut.set(f.stream, f.seq);
       }
       this.stats.statesReceived++;
+      if (this.trace)
+        this.traceState("received", { stream: f.stream, seq: f.seq, time: f.time, data: f.payload, via });
       try {
         this.onState({ stream: f.stream, seq: f.seq, time: f.time, data: f.payload, via, late });
       } catch (e) {
@@ -681,9 +874,9 @@
         }
       }
     }
-    sendFast(b) {
-      const d = this.datagram;
-      if (!d?.open || d.bufferedAmount > this.highWater)
+    sendFast(b, via = this.fastTransport) {
+      const d = via && this.paths.get(via)?.link;
+      if (!d || !d.open || d.bufferedAmount > this.highWater || b.length > (d.maxMessageBytes ?? Infinity))
         return false;
       try {
         if (!d.send(b))
@@ -697,21 +890,25 @@
     /** Binary on the datagram path when it is proven, else the WebSocket. */
     sendBinary(b, preferFast) {
       const ws = this.reliable;
-      if (preferFast && this.fastActive && this.datagram && this.datagram.bufferedAmount <= this.highWater)
-        return this.sendFast(b);
+      const via = this.fastTransport;
+      if (preferFast && via && this.sendFast(b, via))
+        return via;
+      const other = via === "wt" ? "rtc" : "wt";
+      if (preferFast && this.datagramProven(other) && this.sendFast(b, other))
+        return other;
       if (!ws?.open || ws.bufferedAmount > this.highWater)
-        return false;
+        return null;
       try {
         if (!ws.send(b))
-          return false;
+          return null;
       } catch {
-        return false;
+        return null;
       }
       this.stats.bytesSent += b.length;
-      return true;
+      return "ws";
     }
     pump() {
-      const now = this.now(), d = this.datagram;
+      const now = this.now();
       if (this.events.waiting && now >= this.eventRetryAt) {
         const before = this.events.received;
         try {
@@ -725,17 +922,17 @@
         if (this.events.received > before)
           this.ackDue = true;
       }
-      if (d) {
-        if (!d.open && now - this.attachedAt > this.probeTimeout || this.fast && now - this.proofAt > this.probeTimeout || !this.fast && now - this.attachedAt > this.probeTimeout * 2)
-          this.dropDatagram();
-        else if (d.open && now - this.lastProbe >= this.probeInterval) {
-          this.lastProbe = now;
+      for (const [via, path] of this.paths) {
+        if (!path.link.open && now - path.attachedAt > this.probeTimeout || path.proven && now - path.proofAt > this.probeTimeout || !path.proven && now - path.attachedAt > this.probeTimeout * 2)
+          this.dropDatagram(true, via);
+        else if (path.link.open && now - path.lastProbe >= this.probeInterval) {
+          path.lastProbe = now;
           const seq = this.probeSeq = this.probeSeq + 1 >>> 0;
-          this.probes.set(seq, now);
-          for (const [s, at] of this.probes)
+          path.probes.set(seq, now);
+          for (const [s, at] of path.probes)
             if (now - at > this.probeTimeout)
-              this.probes.delete(s);
-          this.sendFast(encodeFrame({ kind: FrameKind.probe, epoch: this.epoch, stream: 0, seq, time: this.timeBase, payload: new Uint8Array() }, this.timeBase));
+              path.probes.delete(s);
+          this.sendFast(encodeFrame({ kind: FrameKind.probe, epoch: this.epoch, stream: 0, seq, time: this.timeBase, payload: new Uint8Array() }, this.timeBase), via);
         }
       }
       this.flush();
@@ -746,17 +943,26 @@
         return;
       if (this.ackDue)
         this.ackDue = !this.sendControl({ t: "ack", e: this.epoch, s: this.events.received });
+      let protectedState = now - this.lastStateAt <= 250 ? this.lastStateBytes : 0;
+      if (this.queued.size)
+        protectedState = [...this.queued.values()].reduce((total, q) => total + q.frame.payload.length + HEADER_BYTES, 0);
       for (const e of this.events.entries()) {
         if (e.seq <= this.lastEventSent)
           continue;
         const encoded = `{"t":"event","e":${this.epoch},"s":${e.seq},"d":${e.text}}`;
         const size = utf8Length(encoded);
-        if (ws.bufferedAmount > this.highWater || !this.budget.take(size, now))
+        if (ws.bufferedAmount > this.highWater)
+          break;
+        const refund = this.budget.reserve("event", size, now, protectedState);
+        if (!refund)
           break;
         try {
-          if (!ws.send(encoded))
+          if (!ws.send(encoded)) {
+            refund();
             break;
+          }
         } catch {
+          refund();
           break;
         }
         this.events.sent(e.seq);
@@ -771,21 +977,29 @@
         if (q.deadline <= now) {
           this.queued.delete(id);
           this.stats.expired++;
+          if (this.trace)
+            this.traceState("discarded", { ...q.frame, data: q.frame.payload }, { reason: "expired" });
         }
       if (!this.queued.size)
         return;
       const queue = [...this.queued.values()].sort((a, b) => b.priority + (now - b.first) / 100 - (a.priority + (now - a.first) / 100));
       let count = 0;
       for (const q of queue) {
-        if (count++ >= maxPackets)
+        if (count >= maxPackets)
           break;
         const b = encodeFrame(q.frame, this.timeBase);
-        if (!this.budget.take(b.length, now))
-          break;
-        if (!this.sendBinary(b, q.frame.payload.length <= this.datagramStateBytes)) {
+        const refund = this.budget.reserve("state", b.length, now, this.events.queuedThrough <= this.lastEventSent ? 0 : Infinity);
+        if (!refund)
+          continue;
+        const via = this.sendBinary(b, q.frame.payload.length <= this.datagramStateBytes);
+        if (!via) {
+          refund();
           this.stats.congested++;
-          break;
+          continue;
         }
+        count++;
+        if (this.trace)
+          this.traceState("sent", { ...q.frame, data: q.frame.payload, via }, { queueMs: now - q.enqueued });
         this.stats.statesSent++;
         this.queued.delete(q.frame.stream);
       }
@@ -890,6 +1104,9 @@
         },
         get bufferedAmount() {
           return link.bufferedAmount;
+        },
+        get maxMessageBytes() {
+          return link.maxMessageBytes;
         },
         close: () => link.close(),
         send(data) {
@@ -1021,6 +1238,10 @@
             get bufferedAmount() {
               return dc.bufferedAmount;
             },
+            get maxMessageBytes() {
+              const size = pc.sctp?.maxMessageSize;
+              return typeof size === "number" && Number.isFinite(size) && size >= 1024 ? size : 64 * 1024 + 14;
+            },
             send(bytes) {
               if (dc.readyState !== "open")
                 return false;
@@ -1121,6 +1342,7 @@
     waiting = true;
     resetOK = true;
     disposed = false;
+    last;
     maxExtrapolation;
     options;
     constructor(context, options) {
@@ -1165,7 +1387,20 @@
       if (this.disposed || !this.resetOK || !this.context.connected() || this.context.now() === null)
         return null;
       this.options.playback.updateDelay(dtMs);
-      return this.ready ? this.options.playback.advance(this.context.now(), 0) : null;
+      if (!this.ready)
+        return null;
+      const now = this.context.now(), at = this.options.playback.advance(now, 0);
+      if (this.last)
+        this.context.trace?.("playback", this.last, { playbackTimeMs: at, playbackDelayMs: now - at });
+      return at;
+    }
+    /** Mark when the game submits a frame, optionally with the actual sampled snapshot time. This is not GPU presentation. */
+    markRendered(sourceTimeMs = this.last?.time) {
+      if (!this.ready || !this.last || sourceTimeMs === void 0)
+        return;
+      if (!Number.isFinite(sourceTimeMs))
+        throw new RangeError("Invalid render source time");
+      this.context.trace?.("rendered", { ...this.last, time: sourceTimeMs });
     }
     /** Remove the receiver without closing the session. A disposed receiver never becomes ready again. */
     dispose() {
@@ -1179,6 +1414,7 @@
     disconnect() {
       this.waiting = true;
       this.newest = -Infinity;
+      this.last = void 0;
     }
     /** @internal Called before application session callbacks, even if disconnect/reconnect happened between render frames. */
     session(resumed) {
@@ -1206,9 +1442,291 @@
       if (now !== null && this.newest > now + tolerance)
         this.newest = -Infinity;
       this.newest = Math.max(this.newest, state.time);
+      if (this.context.trace && (!this.last || state.time >= this.last.time))
+        this.last = { stream: state.stream, seq: state.seq, time: state.time, via: state.via };
+      this.context.trace?.("applied", state);
       const playback = this.options.playback;
       if (this.waiting && playback && now !== null && now - state.time <= playback.maxMs + this.maxExtrapolation)
         playback.observe(now, state.time);
+    }
+  };
+
+  // node_modules/twinwire/dist/core/webtransport.js
+  var observedSessions = /* @__PURE__ */ new WeakSet();
+  var retiredSessions = /* @__PURE__ */ new WeakSet();
+  function observeTransportSession(session) {
+    if (!observedSessions.has(session)) {
+      observedSessions.add(session);
+      void session.closed.then(() => retiredSessions.add(session), () => retiredSessions.add(session));
+    }
+    return session;
+  }
+  function closeTransportSession(session) {
+    if (retiredSessions.has(session))
+      return;
+    retiredSessions.add(session);
+    try {
+      session.close();
+    } catch {
+    }
+  }
+  function deadline(operation, timeoutMs) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("WebTransport handshake timeout")), timeoutMs);
+    });
+    return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
+  }
+  async function readBinding(stream, signal) {
+    const reader = stream.getReader(), buffer = new Uint8Array(4100);
+    const abort = () => {
+      void reader.cancel().catch(() => {
+      });
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    let used = 0, length;
+    try {
+      if (signal?.aborted)
+        throw new Error("WebTransport binding cancelled");
+      for (; ; ) {
+        const { done, value } = await reader.read();
+        if (done)
+          throw new Error("Incomplete WebTransport binding");
+        if (!(value instanceof Uint8Array) || value.length > buffer.length - used)
+          throw new Error("WebTransport binding limit");
+        buffer.set(value, used);
+        used += value.length;
+        if (used >= 4 && length === void 0) {
+          length = new DataView(buffer.buffer).getUint32(0);
+          if (length < 2 || length > 4096)
+            throw new Error("WebTransport binding limit");
+        }
+        if (length !== void 0 && used >= length + 4) {
+          if (used !== length + 4)
+            throw new Error("Trailing WebTransport binding bytes");
+          const tail = await reader.read();
+          if (!tail.done)
+            throw new Error("Trailing WebTransport binding bytes");
+          let value2;
+          try {
+            value2 = JSON.parse(new TextDecoder().decode(buffer.subarray(4, used)));
+          } catch {
+            throw new Error("Invalid WebTransport binding");
+          }
+          if (!value2 || typeof value2 !== "object" || Array.isArray(value2))
+            throw new Error("Invalid WebTransport binding");
+          return value2;
+        }
+      }
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      reader.releaseLock();
+    }
+  }
+  async function writeBinding(stream, message, signal) {
+    const text = new TextEncoder().encode(JSON.stringify(message));
+    if (text.length > 4096)
+      throw new Error("WebTransport binding limit");
+    const frame = new Uint8Array(text.length + 4);
+    new DataView(frame.buffer).setUint32(0, text.length);
+    frame.set(text, 4);
+    const writer = stream.getWriter();
+    const abort = () => {
+      void writer.abort().catch(() => {
+      });
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      if (signal?.aborted)
+        throw new Error("WebTransport binding cancelled");
+      await writer.write(frame);
+      await writer.close();
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      writer.releaseLock();
+    }
+  }
+  function validOffer(value) {
+    if (!value || typeof value !== "object")
+      return false;
+    const v = value;
+    try {
+      const u = new URL(v.url);
+      return u.protocol === "https:" && !u.username && !u.password && !u.hash && /^[\w-]{32,128}$/.test(v.ticket) && Number.isSafeInteger(v.a) && v.a > 0;
+    } catch {
+      return false;
+    }
+  }
+  function datagramConnection(session, maxMessageBytes, callbacks, maxBufferedBytes = 64 * 1024) {
+    observeTransportSession(session);
+    const writable = session.datagrams.writable ?? session.datagrams.createWritable?.();
+    if (!writable)
+      throw new Error("No WebTransport datagram writer");
+    const writer = writable.getWriter(), reader = session.datagrams.readable.getReader();
+    let alive = true, buffered = 0;
+    const releaseReaders = [() => reader.releaseLock()];
+    const limit = () => {
+      const current = session.datagrams.maxDatagramSize;
+      return typeof current === "number" && Number.isSafeInteger(current) && current >= 0 ? Math.min(maxMessageBytes, current) : maxMessageBytes;
+    };
+    const close = () => {
+      if (!alive)
+        return;
+      alive = false;
+      for (const release of releaseReaders)
+        release();
+      void writer.abort().catch(() => {
+      }).finally(() => writer.releaseLock());
+      closeTransportSession(session);
+    };
+    const failure = () => {
+      if (alive) {
+        close();
+        callbacks.closed();
+      }
+    };
+    void session.closed.then(failure, failure);
+    const rejectStreams = (streams, reject) => {
+      if (!streams)
+        return;
+      const incoming = streams.getReader();
+      releaseReaders.push(() => incoming.releaseLock());
+      void (async () => {
+        let count = 0;
+        try {
+          while (alive) {
+            const { done, value } = await incoming.read();
+            if (done)
+              break;
+            reject(value);
+            if (++count > 8) {
+              failure();
+              break;
+            }
+          }
+        } catch {
+          failure();
+        } finally {
+          incoming.releaseLock();
+        }
+      })();
+    };
+    rejectStreams(session.incomingBidirectionalStreams, (stream) => {
+      void stream.readable.cancel().catch(() => {
+      });
+      void stream.writable.abort().catch(() => {
+      });
+    });
+    rejectStreams(session.incomingUnidirectionalStreams, (stream) => {
+      void stream.cancel().catch(() => {
+      });
+    });
+    const link = {
+      get open() {
+        return alive;
+      },
+      get bufferedAmount() {
+        return buffered;
+      },
+      get maxMessageBytes() {
+        return limit();
+      },
+      send(bytes) {
+        if (!alive || bytes.length > limit() || buffered + bytes.length > maxBufferedBytes)
+          return false;
+        buffered += bytes.length;
+        void writer.write(bytes.slice()).then(() => {
+          buffered -= bytes.length;
+        }, () => {
+          buffered -= bytes.length;
+          failure();
+        });
+        return true;
+      },
+      close
+    };
+    void (async () => {
+      try {
+        while (alive) {
+          const { done, value } = await reader.read();
+          if (done) {
+            failure();
+            break;
+          }
+          if (!alive)
+            break;
+          if (!(value instanceof Uint8Array) || value.length > maxMessageBytes)
+            throw new Error("WebTransport datagram limit");
+          callbacks.data(value);
+        }
+      } catch {
+        failure();
+      } finally {
+        reader.releaseLock();
+      }
+    })();
+    return link;
+  }
+  var bindingVersion = VERSION;
+
+  // node_modules/twinwire/dist/client/webtransport.js
+  var BrowserWebTransportPeer = class {
+    callbacks;
+    session;
+    alive = true;
+    abort = new AbortController();
+    constructor(callbacks) {
+      this.callbacks = callbacks;
+    }
+    static supported(options) {
+      return !!options.create || typeof globalThis.WebTransport === "function";
+    }
+    async connect(offer, epoch, options) {
+      try {
+        const native = globalThis.WebTransport;
+        const create2 = options.create ?? ((url, opts) => new native(url, opts));
+        const session = this.session = observeTransportSession(create2(offer.url, {
+          requireUnreliable: true,
+          congestionControl: "low-latency",
+          ...options.serverCertificateHashes ? { serverCertificateHashes: options.serverCertificateHashes } : {}
+        }));
+        void session.closed.then(() => this.abort.abort(), () => this.abort.abort());
+        await deadline((async () => {
+          await session.ready;
+          if (!this.alive)
+            return;
+          if (session.reliability === "reliable-only")
+            throw new Error("WebTransport is reliable-only");
+          const size = session.datagrams.maxDatagramSize;
+          if (!Number.isSafeInteger(size) || size < 1024 || !session.createBidirectionalStream)
+            throw new Error("WebTransport capabilities unavailable");
+          const stream = await session.createBidirectionalStream();
+          await writeBinding(stream.writable, { v: bindingVersion, e: epoch, a: offer.a, ticket: offer.ticket, maxDatagramSize: size }, this.abort.signal);
+          const reply = await readBinding(stream.readable, this.abort.signal);
+          if (reply.ok !== true || reply.unreliableDatagrams !== true || !Number.isSafeInteger(reply.maxDatagramSize) || reply.maxDatagramSize < 1024 || reply.maxDatagramSize > size)
+            throw new Error("WebTransport binding rejected");
+          if (!this.alive)
+            return;
+          const link = datagramConnection(session, reply.maxDatagramSize, this.callbacks);
+          if (this.alive)
+            this.callbacks.open(link);
+          else
+            link.close();
+        })(), options.connectTimeoutMs ?? 5e3);
+      } catch {
+        if (this.alive) {
+          this.close();
+          this.callbacks.closed();
+        }
+      }
+    }
+    close() {
+      if (!this.alive)
+        return;
+      this.alive = false;
+      this.abort.abort();
+      if (this.session)
+        closeTransportSession(this.session);
     }
   };
 
@@ -1244,6 +1762,13 @@
     generation = 0;
     epoch = 0;
     peer;
+    wtPeer;
+    wtOffer;
+    wtAttempt = 0;
+    wtGeneration = 0;
+    wtRetryAt = Infinity;
+    wtFailures = 0;
+    serverWt = false;
     rtcAttempt = 0;
     rtcStartedAt = 0;
     rtcRetryAt = Infinity;
@@ -1284,7 +1809,11 @@
       }
     }
     makeEndpoint() {
-      const e = new Endpoint({ ...this.options.endpoint, impair: this.options.impair ?? this.options.endpoint?.impair });
+      const e = new Endpoint({
+        ...this.options.endpoint,
+        impair: this.options.impair ?? this.options.endpoint?.impair,
+        traceClock: () => this.clock.synced ? { serverTimeMs: this.clock.serverTime(performance.now()), uncertaintyMs: this.clock.uncertaintyMs } : null
+      });
       e.onState = (s) => {
         const receiver = this.stateReceivers.get(s.stream);
         if (receiver)
@@ -1310,7 +1839,7 @@
       };
       e.onStateAck = (stream, seq) => this.onStateAck(stream, seq);
       e.onCallbackError = (error) => this.report(error);
-      e.onFastDown = () => this.stopRtc(true);
+      e.onFastDown = (via) => via === "wt" ? this.stopWt(true) : this.stopRtc(true);
       e.onFastChange = () => this.noteTransport();
       return e;
     }
@@ -1341,7 +1870,8 @@
         remove: () => {
           if (this.stateReceivers.get(stream) === receiver)
             this.stateReceivers.delete(stream);
-        }
+        },
+        trace: this.options.endpoint?.trace ? (stage, state, details) => this.endpoint.traceState(stage, state, details) : void 0
       }, options);
       this.stateReceivers.set(stream, receiver);
       if (this.status === "online")
@@ -1373,12 +1903,14 @@
     }
     /** Which path state messages take right now. */
     get transport() {
-      return this.status !== "online" ? "none" : this.endpoint.fastActive ? "rtc" : "ws";
+      return this.status !== "online" ? "none" : this.endpoint.fastTransport ?? "ws";
     }
     noteTransport() {
       const t = this.transport;
       if (t === "rtc")
         this.rtcFailures = 0;
+      if (t === "wt")
+        this.wtFailures = 0;
       if (t !== this.lastTransport) {
         this.lastTransport = t;
         try {
@@ -1483,6 +2015,7 @@
         this.socket = void 0;
         this.endpoint.detach();
         this.stopRtc(false);
+        this.stopWt(false);
         this.pendingPings.clear();
         if (!this.stopped) {
           if ([1002, 1008, 4001, 4002, 4004].includes(ev.code)) {
@@ -1508,6 +2041,7 @@
         clearInterval(this.pumpTimer);
         clearTimeout(this.retryTimer);
         this.stopRtc(false);
+        this.stopWt(false);
         this.endpoint.detach();
         ws.close();
         this.setStatus("lost");
@@ -1523,6 +2057,10 @@
         this.epoch = m.e;
         this.reconnects = 0;
         this.serverRtc = m.rtc === true;
+        this.wtOffer = validOffer(m.wt) ? m.wt : void 0;
+        this.serverWt = !!this.wtOffer;
+        this.wtFailures = 0;
+        this.wtRetryAt = performance.now();
         this.iceServers = validIceServers(m.ice) ? m.ice : [];
         this.endpoint.attach(this.epoch, {
           get open() {
@@ -1579,6 +2117,20 @@
         this.clock.observe(at, performance.now(), m.s);
         return;
       }
+      if (m.t === "probe" && isUint(m.n)) {
+        this.endpoint.sendControl({ t: "probe-ack", e: this.epoch, n: m.n });
+        return;
+      }
+      if (m.t === "wt-offer" && validOffer(m.d) && m.d.a > this.wtAttempt) {
+        this.stopWt(false, false);
+        this.wtOffer = m.d;
+        this.wtRetryAt = performance.now();
+        return;
+      }
+      if (m.t === "wt-reset" && m.a === this.wtAttempt && this.wtPeer) {
+        this.stopWt(false);
+        return;
+      }
       if (m.t === "signal" && m.a === this.rtcAttempt && validSignal(m.d)) {
         void this.peer?.signal(m.d);
         return;
@@ -1592,6 +2144,7 @@
       this.socket = void 0;
       this.endpoint.detach();
       this.stopRtc(false);
+      this.stopWt(false);
       this.pendingPings.clear();
       this.closingDeadline = this.wakeDeadline = Infinity;
       try {
@@ -1670,12 +2223,64 @@
         this.stopRtc(true);
       }
     }
+    startWt() {
+      const options = this.options.webtransport;
+      if (options === false || !this.serverWt || this.wtPeer || this.status !== "online" || !BrowserWebTransportPeer.supported(options ?? {}))
+        return;
+      const offer = this.wtOffer;
+      this.wtOffer = void 0;
+      if (!offer) {
+        this.endpoint.sendControl({ t: "wt-request", e: this.epoch });
+        this.wtRetryAt = performance.now() + (options?.retryMs ?? 3e3);
+        return;
+      }
+      const generation = ++this.wtGeneration, epoch = this.epoch;
+      this.wtAttempt = offer.a;
+      this.wtRetryAt = Infinity;
+      const current = () => generation === this.wtGeneration && epoch === this.epoch && this.status === "online" && !this.stopped;
+      const peer = new BrowserWebTransportPeer({
+        open: (link) => {
+          if (current())
+            this.endpoint.attachDatagram(link, "wt");
+          else
+            link.close();
+        },
+        data: (data) => {
+          if (current())
+            this.endpoint.receiveBinary(data, "wt");
+        },
+        closed: () => {
+          if (current())
+            this.stopWt(true);
+        },
+        error: () => {
+          if (current())
+            this.stopWt(true);
+        }
+      });
+      this.wtPeer = peer;
+      void peer.connect(offer, epoch, options ?? {});
+    }
+    stopWt(notify, failed = true) {
+      ++this.wtGeneration;
+      const peer = this.wtPeer;
+      this.wtPeer = void 0;
+      this.wtOffer = void 0;
+      this.endpoint.dropDatagram(false, "wt");
+      peer?.close();
+      if (notify && peer)
+        this.endpoint.sendControl({ t: "wt-reset", e: this.epoch, a: this.wtAttempt });
+      this.wtRetryAt = performance.now() + Math.min(6e4, (this.options.webtransport && this.options.webtransport.retryMs || 3e3) * 2 ** Math.min(this.wtFailures, 4));
+      if (peer && failed)
+        this.wtFailures++;
+      this.noteTransport();
+    }
     stopRtc(notify) {
       const a = this.rtcAttempt, peer = this.peer;
       this.peer = void 0;
       if (notify && peer)
         this.endpoint.sendControl({ t: "rtc-reset", e: this.epoch, a });
-      this.endpoint.dropDatagram(false);
+      this.endpoint.dropDatagram(false, "rtc");
       peer?.close();
       this.rtcRetryAt = performance.now() + Math.min(6e4, (this.options.rtcRetryMs ?? 3e3) * 2 ** Math.min(this.rtcFailures++, 4));
       this.noteTransport();
@@ -1694,6 +2299,7 @@
         if (this.socket && this.socket.readyState !== 1) {
           this.endpoint.detach();
           this.stopRtc(false);
+          this.stopWt(false);
           this.pendingPings.clear();
           this.closingDeadline = now + Math.min(1e3, this.options.heartbeatTimeoutMs ?? 8e3);
           this.setStatus("connecting");
@@ -1705,11 +2311,17 @@
           if (burst)
             this.burstLeft--;
         }
-        if (this.peer && now - this.rtcStartedAt > (this.options.rtcConnectTimeoutMs ?? 8e3) && !this.endpoint.fastActive)
+        if (this.peer && now - this.rtcStartedAt > (this.options.rtcConnectTimeoutMs ?? 8e3) && !this.endpoint.datagramProven("rtc"))
           this.stopRtc(true);
         if (!this.peer && now >= this.rtcRetryAt)
           this.startRtc();
+        if (!this.wtPeer && now >= this.wtRetryAt)
+          this.startWt();
         this.endpoint.pump();
+        if (this.endpoint.datagramProven("wt"))
+          this.wtFailures = 0;
+        if (this.endpoint.datagramProven("rtc"))
+          this.rtcFailures = 0;
         this.noteTransport();
       } else if (this.socket && (now >= this.closingDeadline || now - this.openedAt > 1e4)) {
         this.replaceSocket("handshake timeout");
@@ -1744,6 +2356,7 @@
       clearTimeout(this.retryTimer);
       clearInterval(this.pumpTimer);
       this.stopRtc(false);
+      this.stopWt(false);
       this.endpoint.detach();
       this.socket?.close(4003, "paused");
       this.socket = void 0;
@@ -4267,7 +4880,7 @@ void main() {
   function connectToServer(scene) {
     const url = new URL("/connect", location.href);
     url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    channel = createEventClient({ url: url.href, room: NAMESPACE, latest: LATEST, stateMaxAgeMs: 250, rtc: new URLSearchParams(location.search).get("rtc") === "0" ? false : void 0 });
+    channel = createEventClient({ url: url.href, room: NAMESPACE, latest: LATEST, stateMaxAgeMs: 250, rtc: new URLSearchParams(location.search).get("rtc") === "0" ? false : void 0, webtransport: new URLSearchParams(location.search).get("rtc") === "0" ? false : void 0 });
     channel.net.bindPageLifecycle();
     channel.onPause = () => {
       connected = false;
